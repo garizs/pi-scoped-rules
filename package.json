@@ -1,0 +1,43 @@
+{
+  "name": "pi-scoped-rules",
+  "version": "0.1.0",
+  "description": "Scoped, ephemeral project rules for pi coding agent",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "pi-coding-agent",
+    "rules",
+    "mdc",
+    "context-management"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/garizs/pi-scoped-rules.git"
+  },
+  "bugs": {
+    "url": "https://github.com/garizs/pi-scoped-rules/issues"
+  },
+  "homepage": "https://github.com/garizs/pi-scoped-rules#readme",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "package.json",
+    "tsconfig.json"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.67.68",
+    "typescript": "^5.9.3"
+  }
+}
