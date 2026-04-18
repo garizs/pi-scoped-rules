@@ -6,64 +6,160 @@ Scoped, ephemeral project rules for [Pi coding agent](https://github.com/badlogi
 
 Generic MDC / rules integrations often have two problems on long runs:
 
-1. they dedupe by file path instead of logical scope
+1. they dedupe by file path instead of logical rule scope
 2. they inject full rule blobs into persistent conversation history
 
 That can waste context on broad tasks that touch many files, layers, or subsystems.
 
-`pi-scoped-rules` is intended to solve that by:
+`pi-scoped-rules` is built to solve that by:
 
-- loading project rules from Markdown files
+- loading project rules from Markdown / MDC files
 - matching them by file globs and logical scopes
-- blocking only mutating actions when required scopes are missing
+- blocking only mutating actions when required scoped rules are missing
 - injecting rule guidance **ephemerally** via Pi's `context` event
 - avoiding persistent `custom_message` rule blobs in session history
-- keeping rule state outside LLM context via extension custom entries / in-memory state
+- keeping runtime state outside LLM context
 
-## Design goals
+## Key behavior
 
-- **Scope dedupe** instead of path dedupe
-- **Mutation-only gating** by default
-- **Ephemeral context injection** instead of persistent history pollution
-- **Short global prompt overhead**
-- **Project-local rule source files** that remain easy to version and review
-- **Reusable across stacks**: Unity, Python backends, TypeScript apps, etc.
+### 1. Rules are versioned project files
 
-## Planned architecture
-
-### Rule sources
-
-Project rules live in Markdown files, for example:
+By default the extension loads rules from:
 
 - `.agents/rules/`
 - `.pi/rules/`
 
-Each rule can define:
+It supports both `.md` and `.mdc` files.
 
-- trigger mode
-- file globs
-- scope id
-- short description
-- full rule body
+### 2. Mutations are gated, reads are not
 
-### Runtime behavior
+By default the extension only watches these mutating tools:
 
-1. Agent attempts a mutating tool call (`edit`, `write`, or configured custom mutators)
-2. Extension resolves matching scopes for the target path
-3. If scopes are missing for the current run, the mutating tool is blocked with a **short** reason
-4. On the next LLM call, the extension injects the relevant scoped rule pack via `context`
-5. The LLM retries with the correct guidance in-context
-6. Active scoped guidance is cleared when the agent run ends
+- `edit`
+- `write`
 
-## Why `context` event matters
+If a mutation targets a path matched by scoped rules and those scopes are not active for the current run, the tool call is blocked with a **short** reason.
 
-Pi's `context` event can modify messages **non-destructively before each LLM call**. That means scoped rules can be added temporarily without writing them into session history.
+### 3. Scoped guidance is ephemeral
 
-This is better than using persistent extension messages for rules, because `custom_message` entries participate in LLM context and can accumulate over long sessions.
+When a mutation is blocked, the relevant scopes are activated for the current agent run.
+On subsequent LLM calls in that same run, the extension injects the matching rules through Pi's `context` event.
 
-## Status
+This means the scoped rules:
 
-Early project scaffold / implementation in progress.
+- are visible to the model when needed
+- do **not** become persistent session history
+- do **not** keep rotting the context across future turns
+
+### 4. Scopes clear at the end of the run
+
+Active scopes are cleared on `agent_end`.
+
+## Supported frontmatter
+
+The loader supports multiple styles so the same project can adapt rules from Pi, Cursor, or Copilot-style sources.
+
+### Pi-style explicit trigger
+
+```md
+---
+trigger: glob
+globs:
+  - "src/**/*.ts"
+scope: backend-api
+description: Backend API rules
+---
+
+Rule body here.
+```
+
+### Cursor / MDC-style
+
+```md
+---
+alwaysApply: true
+---
+
+Always-on guidance.
+```
+
+```md
+---
+description: Unity runtime rules
+globs: "Assets/Scripts/Runtime/**/*.cs"
+---
+
+Scoped rule body here.
+```
+
+### Copilot-style `applyTo`
+
+```md
+---
+description: Python service rules
+applyTo: "services/**/*.py"
+---
+
+Scoped rule body here.
+```
+
+## Trigger semantics
+
+- `always_on`
+  - injected into the system prompt every run
+- `glob`
+  - activated by matching file mutations
+- `model_decision`
+  - loaded and available, but not automatically injected unless you build higher-level behavior around them
+
+If `trigger` is omitted, the loader infers it:
+
+- `alwaysApply: true` -> `always_on`
+- `globs` or `applyTo` present -> `glob`
+- otherwise -> `model_decision`
+
+## Optional project config
+
+Create `.pi/scoped-rules.json` in a project root to configure rule directories and custom mutating tools.
+
+Example:
+
+```json
+{
+  "ruleDirs": [".agents/rules", ".pi/rules"],
+  "includeModelDecisionSummary": false,
+  "mutatingTools": [
+    { "toolName": "edit", "pathFields": ["path"] },
+    { "toolName": "write", "pathFields": ["path"] },
+    { "toolName": "ai_game_developer_script-update-or-create", "pathFields": ["filePath"] },
+    { "toolName": "ai_game_developer_script-delete", "pathFields": ["files"] }
+  ]
+}
+```
+
+`pathFields` can point to either:
+
+- a single string field
+- an array-of-strings field
+
+## Commands
+
+- `/scoped-rules-status` — shows loaded rules and currently active scopes
+
+## Current design choices
+
+- **Scope dedupe instead of path dedupe**
+- **Mutation-only gating** by default
+- **Ephemeral context injection** instead of persistent history pollution
+- **Short global prompt overhead**
+- **Project-local rule source files** that remain easy to version and review
+
+## Development
+
+```bash
+npm install
+npm run typecheck
+```
 
 ## Installation target
 
