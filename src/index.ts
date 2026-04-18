@@ -1,11 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { loadConfig } from "./config.js";
 import { loadRules } from "./loader.js";
 import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedContextMessage, stripScopedContextMessages } from "./render.js";
-import { activateScopes, clearActiveScopes, extractMutationPaths, getActiveScopedRules, getAlwaysOnRules, getMissingScopesForPaths, getModelDecisionRules } from "./runtime.js";
+import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules } from "./runtime.js";
 import type { RuntimeState } from "./types.js";
-
-const STATUS_ID = "pi-scoped-rules";
 
 function createInitialState(): RuntimeState {
 	return {
@@ -20,7 +18,8 @@ function createInitialState(): RuntimeState {
 		},
 		rules: [],
 		diagnostics: [],
-		activeScopes: new Set<string>(),
+		armedScopes: new Set<string>(),
+		pendingScopes: new Set<string>(),
 	};
 }
 
@@ -34,26 +33,8 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		state.diagnostics = result.diagnostics;
 	}
 
-	function updateStatus(ctx: ExtensionContext): void {
-		if (!ctx.hasUI) {
-			return;
-		}
-
-		const alwaysOnCount = getAlwaysOnRules(state.rules).length;
-		const scopedCount = state.rules.filter((rule) => rule.trigger === "glob").length;
-		const activeCount = state.activeScopes.size;
-		const theme = ctx.ui.theme;
-		if (state.diagnostics.length > 0) {
-			ctx.ui.setStatus(STATUS_ID, theme.fg("error", "✖ ") + theme.fg("dim", `scoped-rules invalid:${state.diagnostics.length}`));
-			return;
-		}
-		const prefix = activeCount > 0 ? theme.fg("accent", "● ") : theme.fg("dim", "○ ");
-		ctx.ui.setStatus(STATUS_ID, prefix + theme.fg("dim", `scoped-rules a:${alwaysOnCount} s:${scopedCount} active:${activeCount}`));
-	}
-
 	pi.on("session_start", async (_event, ctx) => {
 		reloadProjectState(ctx.cwd);
-		updateStatus(ctx);
 		if (!ctx.hasUI) {
 			return;
 		}
@@ -68,7 +49,6 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
-		updateStatus(ctx);
 
 		const diagnosticsPrompt = state.diagnostics.length > 0
 			? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls may be blocked until the rule files are fixed.`
@@ -91,14 +71,14 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 	pi.on("context", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
-		const activeRules = getActiveScopedRules(state);
-		if (activeRules.length === 0) {
+		const pendingRules = getPendingScopedRules(state);
+		if (pendingRules.length === 0) {
 			return { messages: stripScopedContextMessages(event.messages) };
 		}
 
 		const messages = stripScopedContextMessages(event.messages);
-		messages.push(buildScopedContextMessage(activeRules, state.config.renderMode));
-		updateStatus(ctx);
+		messages.push(buildScopedContextMessage(pendingRules, state.config.renderMode));
+		clearPendingScopes(state);
 		return { messages };
 	});
 
@@ -119,15 +99,14 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			};
 		}
 
-		const missingScopes = getMissingScopesForPaths(mutationPaths, state.rules, state.activeScopes);
+		const missingScopes = getMissingScopesForPaths(mutationPaths, state.rules, state.armedScopes);
 		if (missingScopes.length === 0) {
 			return;
 		}
 
-		activateScopes(state, missingScopes);
+		armScopes(state, missingScopes);
 		state.lastBlockedPath = mutationPaths[0];
 		state.lastBlockedScopes = missingScopes;
-		updateStatus(ctx);
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Scoped rules activated for ${mutationPaths[0]}: ${missingScopes.join(", ")}`, "info");
@@ -142,24 +121,23 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		};
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		clearActiveScopes(state);
-		updateStatus(ctx);
+	pi.on("agent_end", async () => {
+		clearArmedScopes(state);
 	});
 
 	pi.registerCommand("scoped-rules-status", {
-		description: "Show loaded scoped rules and currently active scopes",
+		description: "Show loaded scoped rules and currently armed/pending scopes",
 		handler: async (_args, ctx) => {
 			reloadProjectState(ctx.cwd);
-			updateStatus(ctx);
 			if (!ctx.hasUI) {
 				return;
 			}
 
-			const active = state.activeScopes.size > 0 ? [...state.activeScopes].join(", ") : "none";
+			const armed = state.armedScopes.size > 0 ? [...state.armedScopes].join(", ") : "none";
+			const pending = state.pendingScopes.size > 0 ? [...state.pendingScopes].join(", ") : "none";
 			const rulesList = state.rules.map((rule) => `${rule.name} [${rule.trigger}] -> ${rule.scope}`).join("\n") || "(none)";
 			const diagnostics = state.diagnostics.map((entry) => `- ${entry.relativePath}: ${entry.message}`).join("\n") || "(none)";
-			ctx.ui.notify(`Active scopes: ${active}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
+			ctx.ui.notify(`Armed scopes: ${armed}\nPending one-shot scopes: ${pending}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
 		},
 	});
 }

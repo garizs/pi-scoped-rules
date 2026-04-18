@@ -40,7 +40,8 @@ export interface RuntimeState {
 	config: ScopedRulesConfig;
 	rules: Rule[];
 	diagnostics: RuleDiagnostic[];
-	activeScopes: Set<string>;
+	armedScopes: Set<string>;
+	pendingScopes: Set<string>;
 	lastBlockedPath?: string;
 	lastBlockedScopes?: string[];
 }

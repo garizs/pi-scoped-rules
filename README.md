@@ -44,8 +44,14 @@ If a mutation targets a path matched by scoped rules and those scopes are not ac
 
 ### 3. Scoped guidance is ephemeral
 
-When a mutation is blocked, the relevant scopes are activated for the current agent run.
-On subsequent LLM calls in that same run, the extension injects the matching rules through Pi's `context` event.
+When a mutation is blocked, the relevant scopes are armed for the current agent run.
+On the **next** LLM call, the extension injects the matching rules through Pi's `context` event and then immediately clears the pending injection set.
+
+That means:
+
+- matching scoped rules influence the next model step
+- the same rule blob is **not** re-injected on every later call in the run
+- armed scopes still prevent repeated re-blocking for the same scopes during the current run
 
 If `renderMode` is `"condensed"`, the extension keeps the same matching rules but rewrites them into a deterministic compact form:
 

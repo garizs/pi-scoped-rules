@@ -45,15 +45,19 @@ export function getMatchingScopedRules(filePath: string, rules: Rule[]): Rule[] 
 	return rules.filter((rule) => rule.trigger === "glob" && matchesAnyGlob(filePath, rule.globs));
 }
 
-export function getActiveScopedRules(state: RuntimeState): Rule[] {
-	return state.rules.filter((rule) => rule.trigger === "glob" && state.activeScopes.has(rule.scope));
+export function getArmedScopedRules(state: RuntimeState): Rule[] {
+	return state.rules.filter((rule) => rule.trigger === "glob" && state.armedScopes.has(rule.scope));
 }
 
-export function getMissingScopesForPaths(paths: string[], rules: Rule[], activeScopes: Set<string>): string[] {
+export function getPendingScopedRules(state: RuntimeState): Rule[] {
+	return state.rules.filter((rule) => rule.trigger === "glob" && state.pendingScopes.has(rule.scope));
+}
+
+export function getMissingScopesForPaths(paths: string[], rules: Rule[], armedScopes: Set<string>): string[] {
 	const missing = new Set<string>();
 	for (const filePath of paths) {
 		for (const rule of getMatchingScopedRules(filePath, rules)) {
-			if (!activeScopes.has(rule.scope)) {
+			if (!armedScopes.has(rule.scope)) {
 				missing.add(rule.scope);
 			}
 		}
@@ -61,14 +65,20 @@ export function getMissingScopesForPaths(paths: string[], rules: Rule[], activeS
 	return [...missing].sort();
 }
 
-export function activateScopes(state: RuntimeState, scopes: string[]): void {
+export function armScopes(state: RuntimeState, scopes: string[]): void {
 	for (const scope of scopes) {
-		state.activeScopes.add(scope);
+		state.armedScopes.add(scope);
+		state.pendingScopes.add(scope);
 	}
 }
 
-export function clearActiveScopes(state: RuntimeState): void {
-	state.activeScopes.clear();
+export function clearPendingScopes(state: RuntimeState): void {
+	state.pendingScopes.clear();
+}
+
+export function clearArmedScopes(state: RuntimeState): void {
+	state.armedScopes.clear();
+	state.pendingScopes.clear();
 	state.lastBlockedPath = undefined;
 	state.lastBlockedScopes = undefined;
 }
