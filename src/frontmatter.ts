@@ -8,15 +8,15 @@ function parseScalar(value: string): unknown {
 	return trimmed;
 }
 
-export function parseFrontmatter(raw: string): { meta: Record<string, unknown>; body: string } {
+export function parseFrontmatter(raw: string): { hasFrontmatter: boolean; meta: Record<string, unknown>; body: string } {
 	if (!raw.startsWith("---\n") && !raw.startsWith("---\r\n")) {
-		return { meta: {}, body: raw };
+		return { hasFrontmatter: false, meta: {}, body: raw };
 	}
 
 	const normalized = raw.replace(/\r\n/g, "\n");
 	const endIndex = normalized.indexOf("\n---\n", 4);
 	if (endIndex === -1) {
-		return { meta: {}, body: raw };
+		return { hasFrontmatter: false, meta: {}, body: raw };
 	}
 
 	const fm = normalized.slice(4, endIndex);
@@ -55,7 +55,7 @@ export function parseFrontmatter(raw: string): { meta: Record<string, unknown>; 
 		currentArrayKey = undefined;
 	}
 
-	return { meta, body };
+	return { hasFrontmatter: true, meta, body };
 }
 
 export function parseStringList(value: unknown): string[] | undefined {

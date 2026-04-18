@@ -17,6 +17,16 @@ export interface ToolMutationSpec {
 	pathFields: string[];
 }
 
+export interface RuleDiagnostic {
+	relativePath: string;
+	message: string;
+}
+
+export interface RuleLoadResult {
+	rules: Rule[];
+	diagnostics: RuleDiagnostic[];
+}
+
 export type RuleRenderMode = "full" | "condensed";
 
 export interface ScopedRulesConfig {
@@ -29,6 +39,7 @@ export interface ScopedRulesConfig {
 export interface RuntimeState {
 	config: ScopedRulesConfig;
 	rules: Rule[];
+	diagnostics: RuleDiagnostic[];
 	activeScopes: Set<string>;
 	lastBlockedPath?: string;
 	lastBlockedScopes?: string[];

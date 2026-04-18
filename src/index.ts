@@ -19,6 +19,7 @@ function createInitialState(): RuntimeState {
 			renderMode: "full",
 		},
 		rules: [],
+		diagnostics: [],
 		activeScopes: new Set<string>(),
 	};
 }
@@ -28,7 +29,9 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 	function reloadProjectState(cwd: string): void {
 		state.config = loadConfig(cwd);
-		state.rules = loadRules(cwd, state.config);
+		const result = loadRules(cwd, state.config);
+		state.rules = result.rules;
+		state.diagnostics = result.diagnostics;
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
@@ -40,6 +43,10 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		const scopedCount = state.rules.filter((rule) => rule.trigger === "glob").length;
 		const activeCount = state.activeScopes.size;
 		const theme = ctx.ui.theme;
+		if (state.diagnostics.length > 0) {
+			ctx.ui.setStatus(STATUS_ID, theme.fg("error", "✖ ") + theme.fg("dim", `scoped-rules invalid:${state.diagnostics.length}`));
+			return;
+		}
 		const prefix = activeCount > 0 ? theme.fg("accent", "● ") : theme.fg("dim", "○ ");
 		ctx.ui.setStatus(STATUS_ID, prefix + theme.fg("dim", `scoped-rules a:${alwaysOnCount} s:${scopedCount} active:${activeCount}`));
 	}
@@ -47,7 +54,14 @@ export default function piScopedRules(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		reloadProjectState(ctx.cwd);
 		updateStatus(ctx);
-		if (ctx.hasUI && state.rules.length > 0) {
+		if (!ctx.hasUI) {
+			return;
+		}
+		if (state.diagnostics.length > 0) {
+			ctx.ui.notify(`Scoped rules: ${state.diagnostics.length} validation error(s). Run /scoped-rules-status`, "error");
+			return;
+		}
+		if (state.rules.length > 0) {
 			ctx.ui.notify(`Scoped rules: loaded ${state.rules.length} rule(s)`, "info");
 		}
 	});
@@ -56,6 +70,9 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		reloadProjectState(ctx.cwd);
 		updateStatus(ctx);
 
+		const diagnosticsPrompt = state.diagnostics.length > 0
+			? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls may be blocked until the rule files are fixed.`
+			: "";
 		const alwaysOnPrompt = buildAlwaysOnPrompt(getAlwaysOnRules(state.rules));
 		const modelDecisionPrompt = state.config.includeModelDecisionSummary
 			? buildModelDecisionPrompt(getModelDecisionRules(state.rules))
@@ -65,6 +82,7 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			+ "\n\n## Scoped project rules\n"
 			+ "Project-specific scoped rules may be activated ephemerally before mutating tool calls."
 			+ " Avoid repeating rule blobs in persistent conversation history."
+			+ diagnosticsPrompt
 			+ alwaysOnPrompt
 			+ modelDecisionPrompt;
 
@@ -90,6 +108,15 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		const mutationPaths = extractMutationPaths(event.toolName, event.input as Record<string, unknown>, state.config);
 		if (mutationPaths.length === 0) {
 			return;
+		}
+
+		if (state.diagnostics.length > 0) {
+			return {
+				block: true,
+				reason:
+					"Scoped rule files contain validation errors. Fix the invalid .mdc files first. "
+					+ "Run /scoped-rules-status to inspect diagnostics.",
+			};
 		}
 
 		const missingScopes = getMissingScopesForPaths(mutationPaths, state.rules, state.activeScopes);
@@ -130,8 +157,9 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			}
 
 			const active = state.activeScopes.size > 0 ? [...state.activeScopes].join(", ") : "none";
-			const rulesList = state.rules.map((rule) => `${rule.name} [${rule.trigger}] -> ${rule.scope}`).join("\n");
-			ctx.ui.notify(`Active scopes: ${active}\nRules:\n${rulesList}`, "info");
+			const rulesList = state.rules.map((rule) => `${rule.name} [${rule.trigger}] -> ${rule.scope}`).join("\n") || "(none)";
+			const diagnostics = state.diagnostics.map((entry) => `- ${entry.relativePath}: ${entry.message}`).join("\n") || "(none)";
+			ctx.ui.notify(`Active scopes: ${active}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
 		},
 	});
 }

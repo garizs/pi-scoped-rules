@@ -9,6 +9,8 @@ Generic MDC / rules integrations often have two problems on long runs:
 1. they dedupe by file path instead of logical rule scope
 2. they inject full rule blobs into persistent conversation history
 
+This package intentionally supports **one canonical rule format only**. No format zoo, no alias guessing, no trigger inference from foreign conventions.
+
 That can waste context on broad tasks that touch many files, layers, or subsystems.
 
 `pi-scoped-rules` is built to solve that by:
@@ -29,7 +31,7 @@ By default the extension loads rules from:
 - `.agents/rules/`
 - `.pi/rules/`
 
-It supports both `.md` and `.mdc` files.
+It loads **only `.mdc` files**.
 
 ### 2. Mutations are gated, reads are not
 
@@ -45,6 +47,16 @@ If a mutation targets a path matched by scoped rules and those scopes are not ac
 When a mutation is blocked, the relevant scopes are activated for the current agent run.
 On subsequent LLM calls in that same run, the extension injects the matching rules through Pi's `context` event.
 
+If `renderMode` is `"condensed"`, the extension keeps the same matching rules but rewrites them into a deterministic compact form:
+
+- strips boilerplate lead-in phrases
+- prefers concrete bullet points / numbered guidance
+- collapses whitespace
+- caps each rule to a short bounded set of lines
+- keeps the same matched rule set (selection does not change)
+
+This keeps selection deterministic while shrinking token cost.
+
 This means the scoped rules:
 
 - are visible to the model when needed
@@ -55,68 +67,77 @@ This means the scoped rules:
 
 Active scopes are cleared on `agent_end`.
 
-## Supported frontmatter
+## Canonical .mdc format
 
-The loader supports multiple styles so the same project can adapt rules from Pi, Cursor, or Copilot-style sources.
+Each rule file must be a `.mdc` file with YAML frontmatter and a non-empty Markdown body.
 
-### Pi-style explicit trigger
+### Supported frontmatter keys
+
+- `trigger` — required, one of: `always_on`, `glob`, `model_decision`
+- `scope` — required, non-empty string
+- `description` — required for `model_decision`, optional otherwise
+- `globs` — required for `glob`, forbidden otherwise
+- `name` — optional display name (defaults to filename)
+
+No other frontmatter keys are supported.
+
+### Example: `always_on`
+
+```md
+---
+trigger: always_on
+scope: baseline
+description: Global coding baseline
+---
+
+- Use explicit access modifiers.
+- Keep code readable.
+```
+
+### Example: `glob`
 
 ```md
 ---
 trigger: glob
+scope: runtime-placement
 globs:
-  - "src/**/*.ts"
-scope: backend-api
-description: Backend API rules
+  - "Assets/Scripts/Runtime/Placement/**/*.cs"
+description: Placement rules
 ---
 
-Rule body here.
+- Keep placement ownership explicit.
+- Separate preview from commit.
 ```
 
-### Cursor / MDC-style
+### Example: `model_decision`
 
 ```md
 ---
-alwaysApply: true
+trigger: model_decision
+scope: python-performance
+description: Use when working on Python hot paths and allocation-sensitive code.
 ---
 
-Always-on guidance.
+- Prefer reusable buffers over repeated transient allocations.
+- Measure before and after optimization.
 ```
 
-```md
----
-description: Unity runtime rules
-globs: "Assets/Scripts/Runtime/**/*.cs"
----
+## Validation behavior
 
-Scoped rule body here.
-```
+Invalid `.mdc` files produce diagnostics.
 
-### Copilot-style `applyTo`
+Examples of invalid input:
 
-```md
----
-description: Python service rules
-applyTo: "services/**/*.py"
----
+- missing frontmatter
+- unknown frontmatter keys
+- missing `trigger`
+- missing `scope`
+- missing `globs` for `trigger: glob`
+- `globs` present on non-`glob` rules
+- missing `description` for `trigger: model_decision`
+- empty rule body
 
-Scoped rule body here.
-```
-
-## Trigger semantics
-
-- `always_on`
-  - injected into the system prompt every run
-- `glob`
-  - activated by matching file mutations
-- `model_decision`
-  - loaded and available, but not automatically injected unless you build higher-level behavior around them
-
-If `trigger` is omitted, the loader infers it:
-
-- `alwaysApply: true` -> `always_on`
-- `globs` or `applyTo` present -> `glob`
-- otherwise -> `model_decision`
+If diagnostics are present, mutating tool calls are blocked until the invalid rule files are fixed.
 
 ## Optional project config
 
@@ -171,6 +192,8 @@ This package is inspired by:
   - https://github.com/Common-ka/ai-agent-unity-rules
 - **pi-mdc-rules**, which showed that Markdown-driven rule enforcement is useful in Pi, but also highlighted the context-cost tradeoffs of persistent rule injection:
   - https://www.npmjs.com/package/pi-mdc-rules
+
+This package is **inspired by** those ecosystems, but it deliberately does **not** try to support every external rule syntax. `pi-scoped-rules` defines one strict `.mdc` format and validates against that format.
 
 The main difference in `pi-scoped-rules` is the emphasis on **scope dedupe** and **ephemeral context injection** through Pi's `context` event.
 

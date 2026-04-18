@@ -11,6 +11,15 @@ type EphemeralScopedContextMessage = AgentMessage & {
 
 const CONTEXT_MESSAGE_TYPE = "pi-scoped-rules";
 const DEFAULT_CONDENSED_RULE_LINES = 8;
+const BOILERPLATE_PATTERNS = [
+	/^apply (?:this|these) rules?\b/i,
+	/^use (?:this|these) rules?\b/i,
+	/^use this skill\b/i,
+	/^apply these rules\b/i,
+	/^when (?:working|editing|changing|mutating)\b/i,
+	/^this rule\b/i,
+	/^the following\b/i,
+];
 
 export function buildAlwaysOnPrompt(rules: Rule[]): string {
 	if (rules.length === 0) {
@@ -30,18 +39,45 @@ export function buildModelDecisionPrompt(rules: Rule[]): string {
 	return `\n\n## Available Project Rules\n\n${items}`;
 }
 
+function normalizeLine(line: string): string {
+	return line.replace(/\s+/g, " ").trim();
+}
+
+function isBoilerplateLine(line: string): boolean {
+	return BOILERPLATE_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+function collectBulletLines(lines: string[]): string[] {
+	return lines
+		.filter((line) => /^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line))
+		.map((line) => line.replace(/^[-*+]\s+/, "").replace(/^\d+\.\s+/, "").trim())
+		.filter((line) => line.length > 0)
+		.map((line) => `- ${line}`);
+}
+
+function collectPlainGuidanceLines(lines: string[]): string[] {
+	return lines
+		.filter((line) => !line.startsWith("#"))
+		.filter((line) => !/^[-*+]\s+/.test(line) && !/^\d+\.\s+/.test(line))
+		.filter((line) => !isBoilerplateLine(line));
+}
+
 function condenseRuleContent(content: string): string {
-	const lines = content
+	const normalizedLines = content
 		.split("\n")
-		.map((line) => line.trim())
+		.map(normalizeLine)
 		.filter((line) => line.length > 0);
 
-	if (lines.length <= DEFAULT_CONDENSED_RULE_LINES) {
-		return lines.join("\n");
+	const bulletLines = collectBulletLines(normalizedLines);
+	const candidateLines = bulletLines.length > 0 ? bulletLines : collectPlainGuidanceLines(normalizedLines);
+
+	const compactLines = [...new Set(candidateLines)].slice(0, DEFAULT_CONDENSED_RULE_LINES);
+	if (compactLines.length === 0) {
+		return normalizedLines.slice(0, DEFAULT_CONDENSED_RULE_LINES).join("\n");
 	}
 
-	const head = lines.slice(0, DEFAULT_CONDENSED_RULE_LINES).join("\n");
-	return `${head}\n...`;
+	const condensed = compactLines.join("\n");
+	return candidateLines.length > DEFAULT_CONDENSED_RULE_LINES ? `${condensed}\n...` : condensed;
 }
 
 export function buildScopedContextMessage(rules: Rule[], renderMode: RuleRenderMode): EphemeralScopedContextMessage {

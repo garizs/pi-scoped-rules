@@ -10,31 +10,74 @@ function createTempProject(): string {
 }
 
 describe("loadRules + scope resolution", () => {
-	it("infers triggers from Cursor/Copilot-style frontmatter", () => {
+	it("loads valid strict .mdc rules", () => {
 		const projectDir = createTempProject();
 		const rulesDir = join(projectDir, ".agents", "rules");
 		mkdirSync(rulesDir, { recursive: true });
 
 		writeFileSync(
-			join(rulesDir, "always.mdc"),
-			`---\nalwaysApply: true\n---\n\nAlways-on rule.\n`,
-		);
-		writeFileSync(
-			join(rulesDir, "python.md"),
-			`---\ndescription: Python service rules\napplyTo: \"services/**/*.py\"\n---\n\nUse explicit service boundaries.\n`,
+			join(rulesDir, "placement.mdc"),
+			[
+				"---",
+				"trigger: glob",
+				"scope: runtime-placement",
+				"globs:",
+				"  - \"Assets/Scripts/Runtime/Placement/**/*.cs\"",
+				"description: Placement rules",
+				"---",
+				"",
+				"- Keep placement ownership explicit.",
+			].join("\n"),
 		);
 
-		const rules = loadRules(projectDir, {
+		const result = loadRules(projectDir, {
 			ruleDirs: [".agents/rules"],
 			mutatingTools: [],
 			includeModelDecisionSummary: false,
 			renderMode: "full",
 		});
 
-		expect(rules.map((rule) => ({ name: rule.name, trigger: rule.trigger }))).toEqual([
-			{ name: "always", trigger: "always_on" },
-			{ name: "python", trigger: "glob" },
-		]);
+		expect(result.diagnostics).toEqual([]);
+		expect(result.rules).toHaveLength(1);
+		expect(result.rules[0]?.trigger).toBe("glob");
+		expect(result.rules[0]?.scope).toBe("runtime-placement");
+	});
+
+	it("reports diagnostics for non-canonical or invalid rule files", () => {
+		const projectDir = createTempProject();
+		const rulesDir = join(projectDir, ".agents", "rules");
+		mkdirSync(rulesDir, { recursive: true });
+
+		writeFileSync(
+			join(rulesDir, "invalid.mdc"),
+			[
+				"---",
+				"alwaysApply: true",
+				"scope: invalid-rule",
+				"---",
+				"",
+				"Some content.",
+			].join("\n"),
+		);
+		writeFileSync(
+			join(rulesDir, "ignored.md"),
+			"---\ntrigger: always_on\nscope: ignored\n---\n\nShould not load.\n",
+		);
+
+		const result = loadRules(projectDir, {
+			ruleDirs: [".agents/rules"],
+			mutatingTools: [],
+			includeModelDecisionSummary: false,
+			renderMode: "full",
+		});
+
+		expect(result.rules).toEqual([]);
+		expect(result.diagnostics.map((entry) => entry.message)).toContain(
+			"Unsupported frontmatter key: alwaysApply.",
+		);
+		expect(result.diagnostics.map((entry) => entry.message)).toContain(
+			"Frontmatter field 'trigger' is required and must be one of: always_on, glob, model_decision.",
+		);
 	});
 
 	it("dedupes missing scopes by logical scope instead of file path", () => {
@@ -42,11 +85,11 @@ describe("loadRules + scope resolution", () => {
 		const rulesDir = join(projectDir, ".agents", "rules");
 		mkdirSync(rulesDir, { recursive: true });
 		writeFileSync(
-			join(rulesDir, "placement.md"),
+			join(rulesDir, "placement.mdc"),
 			`---\ntrigger: glob\nscope: runtime-placement\nglobs:\n  - \"Assets/Scripts/Runtime/Placement/**/*.cs\"\n---\n\nPlacement rules.\n`,
 		);
 
-		const rules = loadRules(projectDir, {
+		const result = loadRules(projectDir, {
 			ruleDirs: [".agents/rules"],
 			mutatingTools: [],
 			includeModelDecisionSummary: false,
@@ -58,7 +101,7 @@ describe("loadRules + scope resolution", () => {
 				"Assets/Scripts/Runtime/Placement/A.cs",
 				"Assets/Scripts/Runtime/Placement/B.cs",
 			],
-			rules,
+			result.rules,
 			new Set(),
 		);
 

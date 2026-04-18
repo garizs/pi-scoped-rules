@@ -29,7 +29,30 @@ describe("render helpers", () => {
 		const message = buildScopedContextMessage([sampleRule], "condensed");
 		expect(message.content).toContain("Render mode: condensed");
 		expect(message.content).toContain("runtime-placement");
+		expect(message.content).toContain("- Keep placement ownership explicit.");
 		expect(message.content).toContain("...");
+	});
+
+	it("removes boilerplate prose and keeps concrete guidance in condensed mode", () => {
+		const verboseRule: Rule = {
+			...sampleRule,
+			id: "verbose",
+			name: "verbose",
+			content: [
+				"Apply these rules to placement-layer code only.",
+				"Use this rule whenever you edit placement code.",
+				"",
+				"- Keep placement ownership explicit.",
+				"- Separate preview from commit.",
+				"- Prefer explicit placement outcomes.",
+			].join("\n"),
+		};
+
+		const message = buildScopedContextMessage([verboseRule], "condensed");
+		expect(message.content).not.toContain("Apply these rules to placement-layer code only.");
+		expect(message.content).not.toContain("Use this rule whenever you edit placement code.");
+		expect(message.content).toContain("- Keep placement ownership explicit.");
+		expect(message.content).toContain("- Separate preview from commit.");
 	});
 
 	it("strips previous scoped context messages to avoid history bloat in live context", () => {
