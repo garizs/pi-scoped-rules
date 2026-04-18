@@ -16,6 +16,7 @@ function createInitialState(): RuntimeState {
 				{ toolName: "write", pathFields: ["path"] },
 			],
 			includeModelDecisionSummary: false,
+			renderMode: "full",
 		},
 		rules: [],
 		activeScopes: new Set<string>(),
@@ -78,7 +79,7 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		}
 
 		const messages = stripScopedContextMessages(event.messages);
-		messages.push(buildScopedContextMessage(activeRules));
+		messages.push(buildScopedContextMessage(activeRules, state.config.renderMode));
 		updateStatus(ctx);
 		return { messages };
 	});

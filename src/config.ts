@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ScopedRulesConfig, ToolMutationSpec } from "./types.js";
+import type { RuleRenderMode, ScopedRulesConfig, ToolMutationSpec } from "./types.js";
 
 const DEFAULT_MUTATING_TOOLS: ToolMutationSpec[] = [
 	{ toolName: "edit", pathFields: ["path"] },
@@ -11,12 +11,22 @@ const DEFAULT_CONFIG: ScopedRulesConfig = {
 	ruleDirs: [".agents/rules", ".pi/rules"],
 	mutatingTools: DEFAULT_MUTATING_TOOLS,
 	includeModelDecisionSummary: false,
+	renderMode: "full",
 };
 
 interface RawConfig {
 	ruleDirs?: unknown;
 	mutatingTools?: unknown;
 	includeModelDecisionSummary?: unknown;
+	renderMode?: unknown;
+}
+
+function parseRenderMode(value: unknown): RuleRenderMode | undefined {
+	if (value === "full" || value === "condensed") {
+		return value;
+	}
+
+	return undefined;
 }
 
 function parseMutatingTools(value: unknown): ToolMutationSpec[] | undefined {
@@ -74,5 +84,6 @@ export function loadConfig(cwd: string): ScopedRulesConfig {
 			typeof raw.includeModelDecisionSummary === "boolean"
 				? raw.includeModelDecisionSummary
 				: DEFAULT_CONFIG.includeModelDecisionSummary,
+		renderMode: parseRenderMode(raw.renderMode) ?? DEFAULT_CONFIG.renderMode,
 	};
 }

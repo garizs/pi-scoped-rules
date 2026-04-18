@@ -128,6 +128,7 @@ Example:
 {
   "ruleDirs": [".agents/rules", ".pi/rules"],
   "includeModelDecisionSummary": false,
+  "renderMode": "condensed",
   "mutatingTools": [
     { "toolName": "edit", "pathFields": ["path"] },
     { "toolName": "write", "pathFields": ["path"] },
@@ -136,6 +137,13 @@ Example:
   ]
 }
 ```
+
+Config fields:
+
+- `ruleDirs`: directories to scan for `.md` / `.mdc` rules
+- `includeModelDecisionSummary`: optionally list `model_decision` rules in the system prompt
+- `renderMode`: `"full"` or `"condensed"`
+- `mutatingTools`: custom tool -> path field mappings
 
 `pathFields` can point to either:
 
@@ -154,11 +162,24 @@ Example:
 - **Short global prompt overhead**
 - **Project-local rule source files** that remain easy to version and review
 
+## Inspired by
+
+This package is inspired by:
+
+- the broader **Cursor Rules / MDC** ecosystem, especially community rule collections and conventions around scoped Markdown rule files:
+  - https://github.com/sanjeed5/awesome-cursor-rules-mdc
+  - https://github.com/Common-ka/ai-agent-unity-rules
+- **pi-mdc-rules**, which showed that Markdown-driven rule enforcement is useful in Pi, but also highlighted the context-cost tradeoffs of persistent rule injection:
+  - https://www.npmjs.com/package/pi-mdc-rules
+
+The main difference in `pi-scoped-rules` is the emphasis on **scope dedupe** and **ephemeral context injection** through Pi's `context` event.
+
 ## Development
 
 ```bash
 npm install
 npm run typecheck
+npm test
 ```
 
 ## Installation target

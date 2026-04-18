@@ -17,10 +17,13 @@ export interface ToolMutationSpec {
 	pathFields: string[];
 }
 
+export type RuleRenderMode = "full" | "condensed";
+
 export interface ScopedRulesConfig {
 	ruleDirs: string[];
 	mutatingTools: ToolMutationSpec[];
 	includeModelDecisionSummary: boolean;
+	renderMode: RuleRenderMode;
 }
 
 export interface RuntimeState {
