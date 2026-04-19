@@ -37,6 +37,10 @@ export function getAlwaysOnRules(rules: Rule[]): Rule[] {
 	return rules.filter((rule) => rule.trigger === "always_on");
 }
 
+export function getGlobRules(rules: Rule[]): Rule[] {
+	return rules.filter((rule) => rule.trigger === "glob");
+}
+
 export function getModelDecisionRules(rules: Rule[]): Rule[] {
 	return rules.filter((rule) => rule.trigger === "model_decision");
 }
@@ -72,6 +76,16 @@ export function armScopes(state: RuntimeState, scopes: string[]): void {
 	}
 }
 
+export function getInactiveMatchingScopesForPaths(paths: string[], rules: Rule[], armedScopes: Set<string>): string[] {
+	const matchingScopes = new Set<string>();
+	for (const filePath of paths) {
+		for (const rule of getMatchingScopedRules(filePath, rules)) {
+			matchingScopes.add(rule.scope);
+		}
+	}
+	return [...matchingScopes].filter((scope) => !armedScopes.has(scope)).sort();
+}
+
 export function clearPendingScopes(state: RuntimeState): void {
 	state.pendingScopes.clear();
 }
@@ -81,4 +95,6 @@ export function clearArmedScopes(state: RuntimeState): void {
 	state.pendingScopes.clear();
 	state.lastBlockedPath = undefined;
 	state.lastBlockedScopes = undefined;
+	state.lastActivatedPath = undefined;
+	state.lastActivatedScopes = undefined;
 }

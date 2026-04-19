@@ -44,4 +44,6 @@ export interface RuntimeState {
 	pendingScopes: Set<string>;
 	lastBlockedPath?: string;
 	lastBlockedScopes?: string[];
+	lastActivatedPath?: string;
+	lastActivatedScopes?: string[];
 }

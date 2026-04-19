@@ -1,8 +1,8 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { loadConfig } from "./config.js";
 import { loadRules } from "./loader.js";
-import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedContextMessage, stripScopedContextMessages } from "./render.js";
-import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules } from "./runtime.js";
+import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedContextMessage, buildScopedMutationPrimer, stripScopedContextMessages } from "./render.js";
+import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules } from "./runtime.js";
 import type { RuntimeState } from "./types.js";
 
 function createInitialState(): RuntimeState {
@@ -33,8 +33,11 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		state.diagnostics = result.diagnostics;
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		reloadProjectState(ctx.cwd);
+	function resetRunState(): void {
+		clearArmedScopes(state);
+	}
+
+	function notifyRuleLoad(ctx: { hasUI: boolean; ui: { notify: (message: string, level: "info" | "error") => void } }): void {
 		if (!ctx.hasUI) {
 			return;
 		}
@@ -45,6 +48,18 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		if (state.rules.length > 0) {
 			ctx.ui.notify(`Scoped rules: loaded ${state.rules.length} rule(s)`, "info");
 		}
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		reloadProjectState(ctx.cwd);
+		resetRunState();
+		notifyRuleLoad(ctx);
+	});
+
+	pi.on("session_switch" as never, async (_event: unknown, ctx: ExtensionContext) => {
+		reloadProjectState(ctx.cwd);
+		resetRunState();
+		notifyRuleLoad(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -53,20 +68,23 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		const diagnosticsPrompt = state.diagnostics.length > 0
 			? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls may be blocked until the rule files are fixed.`
 			: "";
+		const globPrimer = buildScopedMutationPrimer(getGlobRules(state.rules));
 		const alwaysOnPrompt = buildAlwaysOnPrompt(getAlwaysOnRules(state.rules));
 		const modelDecisionPrompt = state.config.includeModelDecisionSummary
 			? buildModelDecisionPrompt(getModelDecisionRules(state.rules))
 			: "";
-		const systemPrompt =
-			event.systemPrompt
-			+ "\n\n## Scoped project rules\n"
-			+ "Project-specific scoped rules may be activated ephemerally before mutating tool calls."
-			+ " Avoid repeating rule blobs in persistent conversation history."
-			+ diagnosticsPrompt
-			+ alwaysOnPrompt
-			+ modelDecisionPrompt;
+		const promptSuffix = diagnosticsPrompt + globPrimer + alwaysOnPrompt + modelDecisionPrompt;
+		if (promptSuffix.length === 0) {
+			return;
+		}
 
-		return { systemPrompt };
+		return {
+			systemPrompt:
+				event.systemPrompt
+				+ "\n\n## Scoped project rules\n"
+				+ "Project-specific scoped rules may be activated ephemerally before mutating tool calls. Avoid repeating rule blobs in persistent conversation history."
+				+ promptSuffix,
+		};
 	});
 
 	pi.on("context", async (event, ctx) => {
@@ -115,10 +133,38 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		return {
 			block: true,
 			reason:
-				`Scoped project rules are required before mutating \"${mutationPaths[0]}\". `
-				+ `Activated scopes: ${missingScopes.join(", ")}. `
-				+ "Review the scoped guidance on the next model call and retry the mutation.",
+				`Scoped project rules apply to \"${mutationPaths[0]}\". `
+				+ `Read the file first to activate scopes: ${missingScopes.join(", ")}. `
+				+ "The matching scoped guidance will be injected on the next model call.",
 		};
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		reloadProjectState(ctx.cwd);
+		if (event.toolName !== "read" || event.isError) {
+			return;
+		}
+
+		const readPaths = extractMutationPaths("write", event.input as Record<string, unknown>, {
+			...state.config,
+			mutatingTools: [{ toolName: "write", pathFields: ["path"] }],
+		});
+		if (readPaths.length === 0) {
+			return;
+		}
+
+		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
+		if (activatedScopes.length === 0) {
+			return;
+		}
+
+		armScopes(state, activatedScopes);
+		state.lastActivatedPath = readPaths[0];
+		state.lastActivatedScopes = activatedScopes;
+
+		if (ctx.hasUI) {
+			ctx.ui.notify(`Scoped rules armed from read ${readPaths[0]}: ${activatedScopes.join(", ")}`, "info");
+		}
 	});
 
 	pi.on("agent_end", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScopedContextMessage, stripScopedContextMessages } from "../src/render.js";
+import { buildScopedContextMessage, buildScopedMutationPrimer, stripScopedContextMessages } from "../src/render.js";
 import type { Rule } from "../src/types.js";
 
 const sampleRule: Rule = {
@@ -25,6 +25,13 @@ const sampleRule: Rule = {
 };
 
 describe("render helpers", () => {
+	it("creates a scoped mutation primer for glob rules", () => {
+		const prompt = buildScopedMutationPrimer([sampleRule]);
+		expect(prompt).toContain("Before mutating a file that matches one of these rules, read that file first");
+		expect(prompt).toContain("runtime-placement");
+		expect(prompt).toContain("Assets/Scripts/Runtime/Placement/**/*.cs");
+	});
+
 	it("creates condensed scoped context messages", () => {
 		const message = buildScopedContextMessage([sampleRule], "condensed");
 		expect(message.content).toContain("Render mode: condensed");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { armScopes, clearPendingScopes, getPendingScopedRules } from "../src/runtime.js";
+import { armScopes, clearPendingScopes, getInactiveMatchingScopesForPaths, getPendingScopedRules } from "../src/runtime.js";
 import type { RuntimeState, Rule } from "../src/types.js";
 
 const placementRule: Rule = {
@@ -30,6 +30,20 @@ function createState(): RuntimeState {
 }
 
 describe("runtime state", () => {
+	it("detects inactive matching scopes for read-first activation", () => {
+		const state = createState();
+		const scopes = getInactiveMatchingScopesForPaths([
+			"Assets/Scripts/Runtime/Placement/A.cs",
+		], state.rules, state.armedScopes);
+
+		expect(scopes).toEqual(["runtime-placement"]);
+
+		armScopes(state, scopes);
+		expect(getInactiveMatchingScopesForPaths([
+			"Assets/Scripts/Runtime/Placement/A.cs",
+		], state.rules, state.armedScopes)).toEqual([]);
+	});
+
 	it("arms scopes for future tool calls but injects them only once", () => {
 		const state = createState();
 		armScopes(state, ["runtime-placement"]);

@@ -30,6 +30,21 @@ export function buildAlwaysOnPrompt(rules: Rule[]): string {
 	return `\n\n## Project Always-On Rules\n\n${sections}`;
 }
 
+export function buildScopedMutationPrimer(rules: Rule[]): string {
+	if (rules.length === 0) {
+		return "";
+	}
+
+	const items = rules.map((rule) => {
+		const globs = rule.globs?.join(", ") ?? rule.relativePath;
+		return `- ${rule.name} [scope: ${rule.scope}] -> ${globs}`;
+	}).join("\n");
+
+	return `\n\n## Scoped Mutation Rules\n\n`
+		+ "Some project mutation rules are path-scoped. Before mutating a file that matches one of these rules, read that file first so the matching scoped guidance can be injected on the next model step.\n\n"
+		+ `${items}`;
+}
+
 export function buildModelDecisionPrompt(rules: Rule[]): string {
 	if (rules.length === 0) {
 		return "";
