@@ -42,8 +42,10 @@ export interface RuntimeState {
 	diagnostics: RuleDiagnostic[];
 	armedScopes: Set<string>;
 	pendingScopes: Set<string>;
+	readPaths: Set<string>;
 	lastBlockedPath?: string;
 	lastBlockedScopes?: string[];
+	lastBlockedUnreadPaths?: string[];
 	lastActivatedPath?: string;
 	lastActivatedScopes?: string[];
 }

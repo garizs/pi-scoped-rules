@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { loadConfig } from "./config.js";
 import { loadRules } from "./loader.js";
 import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedContextMessage, buildScopedMutationPrimer, stripScopedContextMessages } from "./render.js";
-import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules } from "./runtime.js";
+import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMatchingScopesForPaths, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "./runtime.js";
 import type { RuntimeState } from "./types.js";
 
 function createInitialState(): RuntimeState {
@@ -20,6 +20,7 @@ function createInitialState(): RuntimeState {
 		diagnostics: [],
 		armedScopes: new Set<string>(),
 		pendingScopes: new Set<string>(),
+		readPaths: new Set<string>(),
 	};
 }
 
@@ -103,7 +104,7 @@ export default function piScopedRules(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
 
-		const mutationPaths = extractMutationPaths(event.toolName, event.input as Record<string, unknown>, state.config);
+		const mutationPaths = extractMutationPaths(event.toolName, event.input as Record<string, unknown>, state.config, ctx.cwd);
 		if (mutationPaths.length === 0) {
 			return;
 		}
@@ -118,23 +119,39 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		}
 
 		const missingScopes = getMissingScopesForPaths(mutationPaths, state.rules, state.armedScopes);
-		if (missingScopes.length === 0) {
+		const unreadScopedPaths = getUnreadScopedPaths(mutationPaths, state.rules, state.readPaths);
+		if (missingScopes.length === 0 && unreadScopedPaths.length === 0) {
 			return;
 		}
 
-		armScopes(state, missingScopes);
+		const queuedScopes = [
+			...new Set([
+				...missingScopes,
+				...getMatchingScopesForPaths(unreadScopedPaths, state.rules),
+			]),
+		].sort();
+		queuePendingScopes(state, queuedScopes);
 		state.lastBlockedPath = mutationPaths[0];
 		state.lastBlockedScopes = missingScopes;
+		state.lastBlockedUnreadPaths = unreadScopedPaths;
 
 		if (ctx.hasUI) {
-			ctx.ui.notify(`Scoped rules activated for ${mutationPaths[0]}: ${missingScopes.join(", ")}`, "info");
+			ctx.ui.notify(`Scoped rules queued for ${mutationPaths[0]}: ${queuedScopes.join(", ")}`, "info");
 		}
+
+		const scopeReason = missingScopes.length > 0
+			? `Activate scopes by reading the target file: ${missingScopes.join(", ")}. `
+			: "";
+		const readReason = unreadScopedPaths.length > 0
+			? `Read the exact file before mutating it: ${unreadScopedPaths.join(", ")}. `
+			: "";
 
 		return {
 			block: true,
 			reason:
 				`Scoped project rules apply to \"${mutationPaths[0]}\". `
-				+ `Read the file first to activate scopes: ${missingScopes.join(", ")}. `
+				+ scopeReason
+				+ readReason
 				+ "The matching scoped guidance will be injected on the next model call.",
 		};
 	});
@@ -148,22 +165,28 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		const readPaths = extractMutationPaths("write", event.input as Record<string, unknown>, {
 			...state.config,
 			mutatingTools: [{ toolName: "write", pathFields: ["path"] }],
-		});
+		}, ctx.cwd);
 		if (readPaths.length === 0) {
 			return;
 		}
 
-		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
-		if (activatedScopes.length === 0) {
+		const matchingScopes = getMatchingScopesForPaths(readPaths, state.rules);
+		if (matchingScopes.length === 0) {
 			return;
 		}
 
-		armScopes(state, activatedScopes);
-		state.lastActivatedPath = readPaths[0];
-		state.lastActivatedScopes = activatedScopes;
+		rememberReadPaths(state, readPaths);
+		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
+		if (activatedScopes.length > 0) {
+			armScopes(state, activatedScopes);
+			state.lastActivatedPath = readPaths[0];
+			state.lastActivatedScopes = activatedScopes;
+		} else {
+			queuePendingScopes(state, matchingScopes);
+		}
 
 		if (ctx.hasUI) {
-			ctx.ui.notify(`Scoped rules armed from read ${readPaths[0]}: ${activatedScopes.join(", ")}`, "info");
+			ctx.ui.notify(`Scoped rules refreshed from read ${readPaths[0]}: ${matchingScopes.join(", ")}`, "info");
 		}
 	});
 
@@ -181,9 +204,10 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 			const armed = state.armedScopes.size > 0 ? [...state.armedScopes].join(", ") : "none";
 			const pending = state.pendingScopes.size > 0 ? [...state.pendingScopes].join(", ") : "none";
+			const readPaths = state.readPaths.size > 0 ? [...state.readPaths].join(", ") : "none";
 			const rulesList = state.rules.map((rule) => `${rule.name} [${rule.trigger}] -> ${rule.scope}`).join("\n") || "(none)";
 			const diagnostics = state.diagnostics.map((entry) => `- ${entry.relativePath}: ${entry.message}`).join("\n") || "(none)";
-			ctx.ui.notify(`Armed scopes: ${armed}\nPending one-shot scopes: ${pending}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
+			ctx.ui.notify(`Armed scopes: ${armed}\nPending one-shot scopes: ${pending}\nRead scoped files: ${readPaths}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
 		},
 	});
 }

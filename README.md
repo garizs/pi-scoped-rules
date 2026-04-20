@@ -41,15 +41,17 @@ By default the extension only watches these mutating tools:
 - `write`
 
 If a mutation targets a path matched by scoped rules and those scopes are not active for the current run, the tool call is blocked with a **short** reason.
+The scope is **not** considered active yet — the agent must successfully `read` the exact target file before later mutations of that file are allowed.
 
 ### 3. Scoped guidance is ephemeral
 
-When a mutation is blocked, the relevant scopes are armed for the current agent run.
-On the **next** LLM call, the extension injects the matching rules through Pi's `context` event and then immediately clears the pending injection set.
+When a mutation is blocked, the relevant scopes are queued for one-shot guidance injection on the **next** LLM call.
+A successful `read` of the exact target file then arms those scopes for the current run, records that file as eligible for mutation, and queues the same scoped guidance again for the following model step that will plan the mutation.
 
 That means:
 
-- matching scoped rules influence the next model step
+- matching scoped rules influence the next model step after a blocked mutation
+- a `read` of the exact target file is what actually activates later mutations of that file
 - the same rule blob is **not** re-injected on every later call in the run
 - armed scopes still prevent repeated re-blocking for the same scopes during the current run
 

@@ -86,7 +86,7 @@ describe("loadRules + scope resolution", () => {
 		mkdirSync(rulesDir, { recursive: true });
 		writeFileSync(
 			join(rulesDir, "placement.mdc"),
-			`---\ntrigger: glob\nscope: runtime-placement\nglobs:\n  - \"Assets/Scripts/Runtime/Placement/**/*.cs\"\n---\n\nPlacement rules.\n`,
+			`---\ntrigger: glob\nscope: runtime-placement\nglobs:\n  - "Assets/Scripts/Runtime/Placement/**/*.cs"\n---\n\nPlacement rules.\n`,
 		);
 
 		const result = loadRules(projectDir, {
