@@ -36,6 +36,17 @@ export interface ScopedRulesConfig {
 	renderMode: RuleRenderMode;
 }
 
+export type ScopedTransitionNotice = {
+	kind: "blocked";
+	targetPath: string;
+	scopes: string[];
+	unreadPaths: string[];
+} | {
+	kind: "armed";
+	targetPath: string;
+	scopes: string[];
+};
+
 export interface RuntimeState {
 	config: ScopedRulesConfig;
 	rules: Rule[];

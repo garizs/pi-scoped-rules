@@ -37,7 +37,7 @@
     "@mariozechner/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.67.68",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
     "@types/node": "^22.15.30",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"

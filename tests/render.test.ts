@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScopedContextMessage, buildScopedMutationPrimer, stripScopedContextMessages } from "../src/render.js";
+import { buildScopedBlockedReason, buildScopedContextMessage, buildScopedMutationPrimer, buildScopedReadPrimer, stripScopedContextMessages } from "../src/render.js";
 import type { Rule } from "../src/types.js";
 
 const sampleRule: Rule = {
@@ -32,12 +32,30 @@ describe("render helpers", () => {
 		expect(prompt).toContain("Assets/Scripts/Runtime/Placement/**/*.cs");
 	});
 
+	it("creates a scoped read primer for read-only analysis flows", () => {
+		const prompt = buildScopedReadPrimer([sampleRule]);
+		expect(prompt).toContain("When you read a matching file for review or analysis");
+		expect(prompt).toContain("runtime-placement");
+	});
+
 	it("creates condensed scoped context messages", () => {
 		const message = buildScopedContextMessage([sampleRule], "condensed");
 		expect(message.content).toContain("Render mode: condensed");
 		expect(message.content).toContain("runtime-placement");
 		expect(message.content).toContain("- Keep placement ownership explicit.");
 		expect(message.content).toContain("...");
+	});
+
+	it("builds a deterministic blocked mutation reason", () => {
+		const reason = buildScopedBlockedReason(
+			"Assets/Scripts/Runtime/Placement/A.cs",
+			["runtime-placement"],
+			["Assets/Scripts/Runtime/Placement/A.cs"],
+		);
+		expect(reason).toContain("SCOPED_RULES_BLOCKED_MUTATION");
+		expect(reason).toContain("retryable_now: false");
+		expect(reason).toContain("requires_next_model_call: true");
+		expect(reason).toContain("read exact file: Assets/Scripts/Runtime/Placement/A.cs");
 	});
 
 	it("removes boilerplate prose and keeps concrete guidance in condensed mode", () => {
@@ -60,6 +78,27 @@ describe("render helpers", () => {
 		expect(message.content).not.toContain("Use this rule whenever you edit placement code.");
 		expect(message.content).toContain("- Keep placement ownership explicit.");
 		expect(message.content).toContain("- Separate preview from commit.");
+	});
+
+	it("includes blocked transition instructions in scoped context messages", () => {
+		const message = buildScopedContextMessage([sampleRule], "full", {
+			kind: "blocked",
+			targetPath: "Assets/Scripts/Runtime/Placement/A.cs",
+			scopes: ["runtime-placement"],
+			unreadPaths: ["Assets/Scripts/Runtime/Placement/A.cs"],
+		});
+		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION BLOCKED]");
+		expect(message.content).toContain("do not retry the mutation in the same tool-calling message as the read");
+	});
+
+	it("includes armed transition instructions in scoped context messages", () => {
+		const message = buildScopedContextMessage([sampleRule], "full", {
+			kind: "armed",
+			targetPath: "Assets/Scripts/Runtime/Placement/A.cs",
+			scopes: ["runtime-placement"],
+		});
+		expect(message.content).toContain("[SCOPED PROJECT RULES: FILE READ COMPLETE]");
+		expect(message.content).toContain("Use them on this model step to plan or apply the upcoming mutation.");
 	});
 
 	it("strips previous scoped context messages to avoid history bloat in live context", () => {

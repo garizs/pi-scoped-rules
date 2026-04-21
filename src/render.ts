@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Rule, RuleRenderMode } from "./types.js";
+import type { Rule, RuleRenderMode, ScopedTransitionNotice } from "./types.js";
 
 type EphemeralScopedContextMessage = AgentMessage & {
 	role: "custom";
@@ -42,6 +42,21 @@ export function buildScopedMutationPrimer(rules: Rule[]): string {
 
 	return `\n\n## Scoped Mutation Rules\n\n`
 		+ "Some project mutation rules are path-scoped. Before mutating a file that matches one of these rules, read that file first so the matching scoped guidance can be injected on the next model step.\n\n"
+		+ `${items}`;
+}
+
+export function buildScopedReadPrimer(rules: Rule[]): string {
+	if (rules.length === 0) {
+		return "";
+	}
+
+	const items = rules.map((rule) => {
+		const globs = rule.globs?.join(", ") ?? rule.relativePath;
+		return `- ${rule.name} [scope: ${rule.scope}] -> ${globs}`;
+	}).join("\n");
+
+	return `\n\n## Scoped Read Rules\n\n`
+		+ "Some project rules are path-scoped. When you read a matching file for review or analysis, the matching scoped guidance may be injected ephemerally on the next model step. Apply that guidance to your reasoning without repeating the full rule blobs in chat history.\n\n"
 		+ `${items}`;
 }
 
@@ -95,7 +110,66 @@ function condenseRuleContent(content: string): string {
 	return candidateLines.length > DEFAULT_CONDENSED_RULE_LINES ? `${condensed}\n...` : condensed;
 }
 
-export function buildScopedContextMessage(rules: Rule[], renderMode: RuleRenderMode): EphemeralScopedContextMessage {
+export function buildScopedBlockedReason(targetPath: string, scopes: string[], unreadPaths: string[]): string {
+	const requiredReads = unreadPaths.length > 0 ? unreadPaths : [targetPath];
+	const payload = {
+		status: "blocked_by_scoped_rules",
+		targetPath,
+		scopes,
+		requiredReads,
+		requiresNextModelCall: true,
+		retryableNow: false,
+	};
+
+	return [
+		"SCOPED_RULES_BLOCKED_MUTATION",
+		"status: blocked_by_scoped_rules",
+		`target: ${targetPath}`,
+		`matching_scopes: ${scopes.join(", ")}`,
+		"required_next_actions:",
+		...requiredReads.map((path) => `- read exact file: ${path}`),
+		"- stop mutating this path in the current tool-calling message",
+		"- wait for the next model call after the exact read succeeds",
+		"- only then retry the mutation",
+		"retryable_now: false",
+		"requires_next_model_call: true",
+		"payload:",
+		JSON.stringify(payload, null, 2),
+	].join("\n");
+}
+
+function buildScopedTransitionHeader(transition: ScopedTransitionNotice | undefined): string {
+	if (!transition) {
+		return "[SCOPED PROJECT RULES ACTIVE]\nApply these project rules to any upcoming file mutations in this agent run.";
+	}
+
+	if (transition.kind === "blocked") {
+		const requiredReads = transition.unreadPaths.length > 0 ? transition.unreadPaths : [transition.targetPath];
+		return [
+			"[SCOPED PROJECT RULES: MUTATION BLOCKED]",
+			`Blocked path: ${transition.targetPath}`,
+			`Scopes: ${transition.scopes.join(", ")}`,
+			"Required next actions:",
+			...requiredReads.map((path) => `- read exact file: ${path}`),
+			"- do not retry the mutation in the same tool-calling message as the read",
+			"- use the scoped rules below on the following model step that plans the mutation",
+		].join("\n");
+	}
+
+	return [
+		"[SCOPED PROJECT RULES: FILE READ COMPLETE]",
+		`Read path: ${transition.targetPath}`,
+		`Armed scopes: ${transition.scopes.join(", ")}`,
+		"The scoped rules below are now armed for this run.",
+		"Use them on this model step to plan or apply the upcoming mutation.",
+	].join("\n");
+}
+
+export function buildScopedContextMessage(
+	rules: Rule[],
+	renderMode: RuleRenderMode,
+	transition?: ScopedTransitionNotice,
+): EphemeralScopedContextMessage {
 	const scopeList = [...new Set(rules.map((rule) => rule.scope))].join(", ");
 	const renderedRules = rules
 		.map((rule) => {
@@ -109,8 +183,7 @@ export function buildScopedContextMessage(rules: Rule[], renderMode: RuleRenderM
 		role: "custom",
 		customType: CONTEXT_MESSAGE_TYPE,
 		content:
-			`[SCOPED PROJECT RULES ACTIVE]\n`
-			+ `Apply these project rules to any upcoming file mutations in this agent run.\n`
+			`${buildScopedTransitionHeader(transition)}\n`
 			+ `Render mode: ${renderMode}\n`
 			+ `Active scopes: ${scopeList}\n\n`
 			+ renderedRules,

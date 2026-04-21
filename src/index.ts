@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { loadConfig } from "./config.js";
 import { loadRules } from "./loader.js";
-import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedContextMessage, buildScopedMutationPrimer, stripScopedContextMessages } from "./render.js";
+import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedBlockedReason, buildScopedContextMessage, buildScopedMutationPrimer, buildScopedReadPrimer, stripScopedContextMessages } from "./render.js";
 import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMatchingScopesForPaths, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "./runtime.js";
 import type { RuntimeState } from "./types.js";
 
@@ -66,10 +66,16 @@ export default function piScopedRules(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
 
+		const activeTools = new Set((event.systemPromptOptions.selectedTools ?? []).map((toolName) => toolName.trim()));
+		const hasActiveMutatingTools = state.config.mutatingTools.some((spec) => activeTools.has(spec.toolName));
 		const diagnosticsPrompt = state.diagnostics.length > 0
-			? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls may be blocked until the rule files are fixed.`
+			? hasActiveMutatingTools
+				? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls may be blocked until the rule files are fixed.`
+				: `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Scoped read guidance may be incomplete until the rule files are fixed.`
 			: "";
-		const globPrimer = buildScopedMutationPrimer(getGlobRules(state.rules));
+		const globPrimer = hasActiveMutatingTools
+			? buildScopedMutationPrimer(getGlobRules(state.rules))
+			: buildScopedReadPrimer(getGlobRules(state.rules));
 		const alwaysOnPrompt = buildAlwaysOnPrompt(getAlwaysOnRules(state.rules));
 		const modelDecisionPrompt = state.config.includeModelDecisionSummary
 			? buildModelDecisionPrompt(getModelDecisionRules(state.rules))
@@ -79,11 +85,15 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			return;
 		}
 
+		const intro = hasActiveMutatingTools
+			? "Project-specific scoped rules may be activated ephemerally after relevant reads and before mutating tool calls. Avoid repeating rule blobs in persistent conversation history."
+			: "Project-specific scoped rules may be activated ephemerally after relevant file reads so review and analysis stay file-aware without polluting persistent conversation history.";
+
 		return {
 			systemPrompt:
 				event.systemPrompt
 				+ "\n\n## Scoped project rules\n"
-				+ "Project-specific scoped rules may be activated ephemerally before mutating tool calls. Avoid repeating rule blobs in persistent conversation history."
+				+ intro
 				+ promptSuffix,
 		};
 	});
@@ -91,12 +101,27 @@ export default function piScopedRules(pi: ExtensionAPI) {
 	pi.on("context", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
 		const pendingRules = getPendingScopedRules(state);
+		const messages = stripScopedContextMessages(event.messages);
 		if (pendingRules.length === 0) {
-			return { messages: stripScopedContextMessages(event.messages) };
+			return { messages };
 		}
 
-		const messages = stripScopedContextMessages(event.messages);
-		messages.push(buildScopedContextMessage(pendingRules, state.config.renderMode));
+		const transition = state.lastBlockedPath && state.lastBlockedScopes
+			? {
+				kind: "blocked" as const,
+				targetPath: state.lastBlockedPath,
+				scopes: state.lastBlockedScopes,
+				unreadPaths: state.lastBlockedUnreadPaths ?? [],
+			}
+			: state.lastActivatedPath && state.lastActivatedScopes
+				? {
+					kind: "armed" as const,
+					targetPath: state.lastActivatedPath,
+					scopes: state.lastActivatedScopes,
+				}
+				: undefined;
+
+		messages.push(buildScopedContextMessage(pendingRules, state.config.renderMode, transition));
 		clearPendingScopes(state);
 		return { messages };
 	});
@@ -131,28 +156,19 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			]),
 		].sort();
 		queuePendingScopes(state, queuedScopes);
+		state.lastActivatedPath = undefined;
+		state.lastActivatedScopes = undefined;
 		state.lastBlockedPath = mutationPaths[0];
-		state.lastBlockedScopes = missingScopes;
+		state.lastBlockedScopes = queuedScopes;
 		state.lastBlockedUnreadPaths = unreadScopedPaths;
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Scoped rules queued for ${mutationPaths[0]}: ${queuedScopes.join(", ")}`, "info");
 		}
 
-		const scopeReason = missingScopes.length > 0
-			? `Activate scopes by reading the target file: ${missingScopes.join(", ")}. `
-			: "";
-		const readReason = unreadScopedPaths.length > 0
-			? `Read the exact file before mutating it: ${unreadScopedPaths.join(", ")}. `
-			: "";
-
 		return {
 			block: true,
-			reason:
-				`Scoped project rules apply to \"${mutationPaths[0]}\". `
-				+ scopeReason
-				+ readReason
-				+ "The matching scoped guidance will be injected on the next model call.",
+			reason: buildScopedBlockedReason(mutationPaths[0], queuedScopes, unreadScopedPaths),
 		};
 	});
 
@@ -176,12 +192,17 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		}
 
 		rememberReadPaths(state, readPaths);
+		state.lastBlockedPath = undefined;
+		state.lastBlockedScopes = undefined;
+		state.lastBlockedUnreadPaths = undefined;
 		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
 		if (activatedScopes.length > 0) {
 			armScopes(state, activatedScopes);
 			state.lastActivatedPath = readPaths[0];
 			state.lastActivatedScopes = activatedScopes;
 		} else {
+			state.lastActivatedPath = readPaths[0];
+			state.lastActivatedScopes = matchingScopes;
 			queuePendingScopes(state, matchingScopes);
 		}
 

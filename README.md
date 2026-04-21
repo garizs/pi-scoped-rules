@@ -48,10 +48,13 @@ The scope is **not** considered active yet — the agent must successfully `read
 When a mutation is blocked, the relevant scopes are queued for one-shot guidance injection on the **next** LLM call.
 A successful `read` of the exact target file then arms those scopes for the current run, records that file as eligible for mutation, and queues the same scoped guidance again for the following model step that will plan the mutation.
 
+For read-only agents that do not expose mutating tools, the extension switches to a read-analysis primer instead of a mutation primer, but the scoped guidance is still injected ephemerally after relevant file reads.
+
 That means:
 
 - matching scoped rules influence the next model step after a blocked mutation
 - a `read` of the exact target file is what actually activates later mutations of that file
+- read-only review / analysis agents still get matching scoped guidance after reading relevant files
 - the same rule blob is **not** re-injected on every later call in the run
 - armed scopes still prevent repeated re-blocking for the same scopes during the current run
 
