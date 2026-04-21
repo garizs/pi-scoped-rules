@@ -122,18 +122,12 @@ export default function piScopedRules(pi: ExtensionAPI) {
 				: undefined;
 
 		messages.push(buildScopedContextMessage(pendingRules, state.config.renderMode, transition));
-		if (ctx.hasUI && transition) {
-			if (transition.kind === "blocked" && transition.unreadPaths.length === 0) {
-				ctx.ui.notify(
-					`Scoped rules armed for file creation ${transition.targetPath}: ${transition.scopes.join(", ")}`,
-					"info",
-				);
-			} else if (transition.kind === "armed") {
-				ctx.ui.notify(
-					`Scoped rules injected after read ${transition.targetPath}: ${transition.scopes.join(", ")}`,
-					"info",
-				);
-			}
+		if (ctx.hasUI) {
+			const injectedScopes = [...new Set(pendingRules.map((rule) => rule.scope))].sort();
+			ctx.ui.notify(
+				`Scoped rules injected for scopes: ${injectedScopes.join(", ")}`,
+				"info",
+			);
 		}
 		clearPendingScopes(state);
 		return { messages };
