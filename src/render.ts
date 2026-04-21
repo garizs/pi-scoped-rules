@@ -111,7 +111,7 @@ function condenseRuleContent(content: string): string {
 }
 
 export function buildScopedBlockedReason(targetPath: string, scopes: string[], unreadPaths: string[]): string {
-	const requiredReads = unreadPaths.length > 0 ? unreadPaths : [targetPath];
+	const requiredReads = unreadPaths;
 	const payload = {
 		status: "blocked_by_scoped_rules",
 		targetPath,
@@ -120,6 +120,7 @@ export function buildScopedBlockedReason(targetPath: string, scopes: string[], u
 		requiresNextModelCall: true,
 		retryableNow: false,
 	};
+	const creationOnly = requiredReads.length === 0;
 
 	return [
 		"SCOPED_RULES_BLOCKED_MUTATION",
@@ -127,9 +128,13 @@ export function buildScopedBlockedReason(targetPath: string, scopes: string[], u
 		`target: ${targetPath}`,
 		`matching_scopes: ${scopes.join(", ")}`,
 		"required_next_actions:",
-		...requiredReads.map((path) => `- read exact file: ${path}`),
+		...(creationOnly
+			? ["- no exact file read is required because the target path does not exist yet"]
+			: requiredReads.map((path) => `- read exact file: ${path}`)),
 		"- stop mutating this path in the current tool-calling message",
-		"- wait for the next model call after the exact read succeeds",
+		...(creationOnly
+			? ["- wait for the next model call so the scoped rules can arm for file creation"]
+			: ["- wait for the next model call after the exact read succeeds"]),
 		"- only then retry the mutation",
 		"retryable_now: false",
 		"requires_next_model_call: true",
@@ -144,15 +149,21 @@ function buildScopedTransitionHeader(transition: ScopedTransitionNotice | undefi
 	}
 
 	if (transition.kind === "blocked") {
-		const requiredReads = transition.unreadPaths.length > 0 ? transition.unreadPaths : [transition.targetPath];
+		const creationOnly = transition.unreadPaths.length === 0;
 		return [
 			"[SCOPED PROJECT RULES: MUTATION BLOCKED]",
 			`Blocked path: ${transition.targetPath}`,
 			`Scopes: ${transition.scopes.join(", ")}`,
 			"Required next actions:",
-			...requiredReads.map((path) => `- read exact file: ${path}`),
-			"- do not retry the mutation in the same tool-calling message as the read",
-			"- use the scoped rules below on the following model step that plans the mutation",
+			...(creationOnly
+				? ["- no exact file read is required because the target path does not exist yet"]
+				: transition.unreadPaths.map((path) => `- read exact file: ${path}`)),
+			...(creationOnly
+				? ["- use the scoped rules below on the following model step that plans the file creation"]
+				: [
+					"- do not retry the mutation in the same tool-calling message as the read",
+					"- use the scoped rules below on the following model step that plans the mutation",
+				]),
 		].join("\n");
 	}
 

@@ -144,7 +144,12 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		}
 
 		const missingScopes = getMissingScopesForPaths(mutationPaths, state.rules, state.armedScopes);
-		const unreadScopedPaths = getUnreadScopedPaths(mutationPaths, state.rules, state.readPaths);
+		const unreadScopedPaths = getUnreadScopedPaths(
+			mutationPaths,
+			state.rules,
+			state.readPaths,
+			ctx.cwd,
+		);
 		if (missingScopes.length === 0 && unreadScopedPaths.length === 0) {
 			return;
 		}
@@ -156,6 +161,9 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			]),
 		].sort();
 		queuePendingScopes(state, queuedScopes);
+		if (unreadScopedPaths.length === 0) {
+			armScopes(state, queuedScopes);
+		}
 		state.lastActivatedPath = undefined;
 		state.lastActivatedScopes = undefined;
 		state.lastBlockedPath = mutationPaths[0];

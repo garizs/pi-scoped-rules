@@ -68,23 +68,18 @@ describe("runtime state", () => {
 		expect([...state.pendingScopes]).toEqual(["runtime-placement"]);
 	});
 
-	it("requires reading the exact target file before scoped mutation", () => {
+	it("does not require an exact file read for a new target path", () => {
 		const state = createState();
 		armScopes(state, ["runtime-placement"]);
 
 		expect(getUnreadScopedPaths([
 			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.readPaths)).toEqual(["Assets/Scripts/Runtime/Placement/A.cs"]);
-
-		rememberReadPaths(state, ["Assets/Scripts/Runtime/Placement/B.cs"]);
-		expect(getUnreadScopedPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.readPaths)).toEqual(["Assets/Scripts/Runtime/Placement/A.cs"]);
+		], state.rules, state.readPaths, "/tmp")).toEqual([]);
 
 		rememberReadPaths(state, ["Assets/Scripts/Runtime/Placement/A.cs"]);
 		expect(getUnreadScopedPaths([
 			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.readPaths)).toEqual([]);
+		], state.rules, state.readPaths, "/tmp")).toEqual([]);
 	});
 
 	it("canonicalizes absolute in-project paths back to project-relative globs", () => {

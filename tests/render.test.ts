@@ -58,6 +58,17 @@ describe("render helpers", () => {
 		expect(reason).toContain("read exact file: Assets/Scripts/Runtime/Placement/A.cs");
 	});
 
+	it("does not require an exact file read when the target file does not exist yet", () => {
+		const reason = buildScopedBlockedReason(
+			"Assets/Scripts/Runtime/Placement/NewFile.cs",
+			["runtime-placement"],
+			[],
+		);
+		expect(reason).toContain("no exact file read is required because the target path does not exist yet");
+		expect(reason).not.toContain("read exact file: Assets/Scripts/Runtime/Placement/NewFile.cs");
+		expect(reason).toContain('"requiredReads": []');
+	});
+
 	it("removes boilerplate prose and keeps concrete guidance in condensed mode", () => {
 		const verboseRule: Rule = {
 			...sampleRule,
@@ -89,6 +100,17 @@ describe("render helpers", () => {
 		});
 		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION BLOCKED]");
 		expect(message.content).toContain("do not retry the mutation in the same tool-calling message as the read");
+	});
+
+	it("describes file-creation blocking without demanding a nonexistent read", () => {
+		const message = buildScopedContextMessage([sampleRule], "full", {
+			kind: "blocked",
+			targetPath: "Assets/Scripts/Runtime/Placement/NewFile.cs",
+			scopes: ["runtime-placement"],
+			unreadPaths: [],
+		});
+		expect(message.content).toContain("no exact file read is required because the target path does not exist yet");
+		expect(message.content).toContain("plans the file creation");
 	});
 
 	it("includes armed transition instructions in scoped context messages", () => {

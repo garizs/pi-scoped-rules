@@ -98,9 +98,20 @@ export function getMatchingScopesForPaths(paths: string[], rules: Rule[]): strin
 	return [...scopes].sort();
 }
 
-export function getUnreadScopedPaths(paths: string[], rules: Rule[], readPaths: Set<string>): string[] {
+function pathExists(filePath: string, cwd: string): boolean {
+	const resolvedPath = filePath.startsWith("/") ? filePath : resolve(cwd, filePath);
+	return existsSync(resolvedPath);
+}
+
+export function getUnreadScopedPaths(
+	paths: string[],
+	rules: Rule[],
+	readPaths: Set<string>,
+	cwd: string,
+): string[] {
 	return paths
 		.filter((filePath) => getMatchingScopedRules(filePath, rules).length > 0)
+		.filter((filePath) => pathExists(filePath, cwd))
 		.filter((filePath) => !readPaths.has(filePath))
 		.sort();
 }
