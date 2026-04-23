@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { RuleRenderMode, ScopedRulesConfig, ToolMutationSpec } from "./types.js";
+import type { RuleRenderMode, ScopedRuleEnforcementMode, ScopedRulesConfig, ToolMutationSpec } from "./types.js";
 
 const DEFAULT_MUTATING_TOOLS: ToolMutationSpec[] = [
 	{ toolName: "edit", pathFields: ["path"] },
@@ -12,6 +12,7 @@ const DEFAULT_CONFIG: ScopedRulesConfig = {
 	mutatingTools: DEFAULT_MUTATING_TOOLS,
 	includeModelDecisionSummary: false,
 	renderMode: "full",
+	enforcementMode: "visible_in_current_context",
 };
 
 interface RawConfig {
@@ -19,10 +20,19 @@ interface RawConfig {
 	mutatingTools?: unknown;
 	includeModelDecisionSummary?: unknown;
 	renderMode?: unknown;
+	enforcementMode?: unknown;
 }
 
 function parseRenderMode(value: unknown): RuleRenderMode | undefined {
 	if (value === "full" || value === "condensed") {
+		return value;
+	}
+
+	return undefined;
+}
+
+function parseEnforcementMode(value: unknown): ScopedRuleEnforcementMode | undefined {
+	if (value === "armed_scope" || value === "visible_in_current_context") {
 		return value;
 	}
 
@@ -85,5 +95,6 @@ export function loadConfig(cwd: string): ScopedRulesConfig {
 				? raw.includeModelDecisionSummary
 				: DEFAULT_CONFIG.includeModelDecisionSummary,
 		renderMode: parseRenderMode(raw.renderMode) ?? DEFAULT_CONFIG.renderMode,
+		enforcementMode: parseEnforcementMode(raw.enforcementMode) ?? DEFAULT_CONFIG.enforcementMode,
 	};
 }

@@ -17,7 +17,7 @@ That can waste context on broad tasks that touch many files, layers, or subsyste
 
 - loading project rules from Markdown / MDC files
 - matching them by file globs and logical scopes
-- blocking only mutating actions when required scoped rules are missing
+- blocking only mutating actions when required scoped rules are missing or not visible in the current provider call
 - injecting rule guidance **ephemerally** via Pi's `context` event
 - avoiding persistent `custom_message` rule blobs in session history
 - keeping runtime state outside LLM context
@@ -40,23 +40,25 @@ By default the extension only watches these mutating tools:
 - `edit`
 - `write`
 
-If a mutation targets a path matched by scoped rules and those scopes are not active for the current run, the tool call is blocked with a **short** reason.
-The scope is **not** considered active yet — the agent must successfully `read` the exact target file before later mutations of that file are allowed.
+If a mutation targets a path matched by scoped rules and those scopes were not visible in the current provider call, the tool call is blocked with a **short** reason.
+For existing files, the agent must also successfully `read` the exact target file before later mutations of that file are allowed.
 
 ### 3. Scoped guidance is ephemeral
 
 When a mutation is blocked, the relevant scopes are queued for one-shot guidance injection on the **next** LLM call.
 A successful `read` of the exact target file then arms those scopes for the current run, records that file as eligible for mutation, and queues the same scoped guidance again for the following model step that will plan the mutation.
+In the default strict mode, `armed` is only bookkeeping: `edit` / `write` is allowed only from a model response generated while the matching scoped rules were visible.
 
 For read-only agents that do not expose mutating tools, the extension switches to a read-analysis primer instead of a mutation primer, but the scoped guidance is still injected ephemerally after relevant file reads.
 
 That means:
 
 - matching scoped rules influence the next model step after a blocked mutation
-- a `read` of the exact target file is what actually activates later mutations of that file
+- a `read` of the exact target file is required before mutating existing scoped files
 - read-only review / analysis agents still get matching scoped guidance after reading relevant files
 - the same rule blob is **not** re-injected on every later call in the run
-- armed scopes still prevent repeated re-blocking for the same scopes during the current run
+- visible scoped rules are tracked per provider call and cleared when no rules are injected
+- armed scopes do not grant mutation permission in the default strict mode
 
 If `renderMode` is `"condensed"`, the extension keeps the same matching rules but rewrites them into a deterministic compact form:
 
@@ -161,6 +163,7 @@ Example:
   "ruleDirs": [".agents/rules", ".pi/rules"],
   "includeModelDecisionSummary": false,
   "renderMode": "condensed",
+  "enforcementMode": "visible_in_current_context",
   "mutatingTools": [
     { "toolName": "edit", "pathFields": ["path"] },
     { "toolName": "write", "pathFields": ["path"] },
@@ -175,6 +178,7 @@ Config fields:
 - `ruleDirs`: directories to scan for `.md` / `.mdc` rules
 - `includeModelDecisionSummary`: optionally list `model_decision` rules in the system prompt
 - `renderMode`: `"full"` or `"condensed"`
+- `enforcementMode`: `"visible_in_current_context"` (default strict mode) or `"armed_scope"` (legacy compatibility)
 - `mutatingTools`: custom tool -> path field mappings
 
 `pathFields` can point to either:
@@ -184,7 +188,7 @@ Config fields:
 
 ## Commands
 
-- `/scoped-rules-status` — shows loaded rules and currently active scopes
+- `/scoped-rules-status` — shows loaded rules plus armed, pending, and last-visible scopes
 
 ## Current design choices
 

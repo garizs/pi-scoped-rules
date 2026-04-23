@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { loadConfig } from "./config.js";
 import { loadRules } from "./loader.js";
 import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedBlockedReason, buildScopedContextMessage, buildScopedMutationPrimer, buildScopedReadPrimer, stripScopedContextMessages } from "./render.js";
-import { armScopes, clearArmedScopes, clearPendingScopes, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMatchingScopesForPaths, getMissingScopesForPaths, getModelDecisionRules, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "./runtime.js";
+import { armScopes, clearArmedScopes, clearLastVisibleScopes, clearPendingScopes, evaluateScopedMutationGate, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMatchingScopesForPaths, getModelDecisionRules, getPendingScopedRules, queuePendingScopes, rememberReadPaths, rememberVisibleScopedRules } from "./runtime.js";
 import type { RuntimeState } from "./types.js";
 
 function createInitialState(): RuntimeState {
@@ -15,11 +15,13 @@ function createInitialState(): RuntimeState {
 			],
 			includeModelDecisionSummary: false,
 			renderMode: "full",
+			enforcementMode: "visible_in_current_context",
 		},
 		rules: [],
 		diagnostics: [],
 		armedScopes: new Set<string>(),
 		pendingScopes: new Set<string>(),
+		lastVisibleScopes: new Set<string>(),
 		readPaths: new Set<string>(),
 	};
 }
@@ -102,9 +104,12 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		reloadProjectState(ctx.cwd);
 		const pendingRules = getPendingScopedRules(state);
 		const messages = stripScopedContextMessages(event.messages);
+		clearLastVisibleScopes(state);
 		if (pendingRules.length === 0) {
 			return { messages };
 		}
+
+		rememberVisibleScopedRules(state, pendingRules);
 
 		const transition = state.lastBlockedPath && state.lastBlockedScopes
 			? {
@@ -112,6 +117,8 @@ export default function piScopedRules(pi: ExtensionAPI) {
 				targetPath: state.lastBlockedPath,
 				scopes: state.lastBlockedScopes,
 				unreadPaths: state.lastBlockedUnreadPaths ?? [],
+				targetExists: state.lastBlockedTargetExists,
+				visibilityRequired: state.lastBlockedVisibilityRequired,
 			}
 			: state.lastActivatedPath && state.lastActivatedScopes
 				? {
@@ -150,40 +157,33 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			};
 		}
 
-		const missingScopes = getMissingScopesForPaths(mutationPaths, state.rules, state.armedScopes);
-		const unreadScopedPaths = getUnreadScopedPaths(
-			mutationPaths,
-			state.rules,
-			state.readPaths,
-			ctx.cwd,
-		);
-		if (missingScopes.length === 0 && unreadScopedPaths.length === 0) {
+		const gate = evaluateScopedMutationGate(mutationPaths, state, ctx.cwd);
+		if (gate.allowed) {
 			return;
 		}
 
-		const queuedScopes = [
-			...new Set([
-				...missingScopes,
-				...getMatchingScopesForPaths(unreadScopedPaths, state.rules),
-			]),
-		].sort();
-		queuePendingScopes(state, queuedScopes);
-		if (unreadScopedPaths.length === 0) {
-			armScopes(state, queuedScopes);
+		queuePendingScopes(state, gate.queuedScopes);
+		if (gate.unreadScopedPaths.length === 0) {
+			armScopes(state, gate.queuedScopes);
 		}
 		state.lastActivatedPath = undefined;
 		state.lastActivatedScopes = undefined;
 		state.lastBlockedPath = mutationPaths[0];
-		state.lastBlockedScopes = queuedScopes;
-		state.lastBlockedUnreadPaths = unreadScopedPaths;
+		state.lastBlockedScopes = gate.queuedScopes;
+		state.lastBlockedUnreadPaths = gate.unreadScopedPaths;
+		state.lastBlockedTargetExists = gate.targetPathExists;
+		state.lastBlockedVisibilityRequired = gate.missingVisibleScopes.length > 0;
 
 		if (ctx.hasUI) {
-			ctx.ui.notify(`Scoped rules queued for ${mutationPaths[0]}: ${queuedScopes.join(", ")}`, "info");
+			ctx.ui.notify(`Scoped rules queued for ${mutationPaths[0]}: ${gate.queuedScopes.join(", ")}`, "info");
 		}
 
 		return {
 			block: true,
-			reason: buildScopedBlockedReason(mutationPaths[0], queuedScopes, unreadScopedPaths),
+			reason: buildScopedBlockedReason(mutationPaths[0], gate.queuedScopes, gate.unreadScopedPaths, {
+				targetExists: gate.targetPathExists,
+				visibilityRequired: gate.missingVisibleScopes.length > 0,
+			}),
 		};
 	});
 
@@ -210,6 +210,8 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		state.lastBlockedPath = undefined;
 		state.lastBlockedScopes = undefined;
 		state.lastBlockedUnreadPaths = undefined;
+		state.lastBlockedTargetExists = undefined;
+		state.lastBlockedVisibilityRequired = undefined;
 		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
 		if (activatedScopes.length > 0) {
 			armScopes(state, activatedScopes);
@@ -240,10 +242,11 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 			const armed = state.armedScopes.size > 0 ? [...state.armedScopes].join(", ") : "none";
 			const pending = state.pendingScopes.size > 0 ? [...state.pendingScopes].join(", ") : "none";
+			const visible = state.lastVisibleScopes.size > 0 ? [...state.lastVisibleScopes].join(", ") : "none";
 			const readPaths = state.readPaths.size > 0 ? [...state.readPaths].join(", ") : "none";
 			const rulesList = state.rules.map((rule) => `${rule.name} [${rule.trigger}] -> ${rule.scope}`).join("\n") || "(none)";
 			const diagnostics = state.diagnostics.map((entry) => `- ${entry.relativePath}: ${entry.message}`).join("\n") || "(none)";
-			ctx.ui.notify(`Armed scopes: ${armed}\nPending one-shot scopes: ${pending}\nRead scoped files: ${readPaths}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
+			ctx.ui.notify(`Enforcement mode: ${state.config.enforcementMode}\nArmed scopes: ${armed}\nPending one-shot scopes: ${pending}\nVisible in last provider call: ${visible}\nRead scoped files: ${readPaths}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
 		},
 	});
 }

@@ -35,6 +35,7 @@ describe("loadRules + scope resolution", () => {
 			mutatingTools: [],
 			includeModelDecisionSummary: false,
 			renderMode: "full",
+			enforcementMode: "visible_in_current_context",
 		});
 
 		expect(result.diagnostics).toEqual([]);
@@ -69,6 +70,7 @@ describe("loadRules + scope resolution", () => {
 			mutatingTools: [],
 			includeModelDecisionSummary: false,
 			renderMode: "full",
+			enforcementMode: "visible_in_current_context",
 		});
 
 		expect(result.rules).toEqual([]);
@@ -94,6 +96,7 @@ describe("loadRules + scope resolution", () => {
 			mutatingTools: [],
 			includeModelDecisionSummary: false,
 			renderMode: "full",
+			enforcementMode: "visible_in_current_context",
 		});
 
 		const missingScopes = getMissingScopesForPaths(

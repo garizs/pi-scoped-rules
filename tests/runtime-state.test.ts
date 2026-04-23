@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { armScopes, clearPendingScopes, extractMutationPaths, getInactiveMatchingScopesForPaths, getMissingScopesForPaths, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "../src/runtime.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { armScopes, clearLastVisibleScopes, clearPendingScopes, evaluateScopedMutationGate, extractMutationPaths, getInactiveMatchingScopesForPaths, getMissingScopesForPaths, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "../src/runtime.js";
 import type { RuntimeState, Rule } from "../src/types.js";
 
 const placementRule: Rule = {
@@ -14,6 +17,28 @@ const placementRule: Rule = {
 	relativePath: ".agents/rules/placement.mdc",
 };
 
+const presentationRule: Rule = {
+	id: "presentation",
+	name: "presentation",
+	scope: "runtime-presentation",
+	trigger: "glob",
+	description: "Presentation rules",
+	globs: ["Assets/Scripts/Runtime/Presentation/**/*.cs"],
+	content: "- Keep presentation passive.",
+	sourcePath: "/tmp/presentation.mdc",
+	relativePath: ".agents/rules/presentation.mdc",
+};
+
+function createTempProject(): string {
+	return mkdtempSync(join(tmpdir(), "pi-scoped-rules-runtime-"));
+}
+
+function createExistingFile(projectDir: string, filePath: string): void {
+	const absolutePath = join(projectDir, filePath);
+	mkdirSync(dirname(absolutePath), { recursive: true });
+	writeFileSync(absolutePath, "// existing\n");
+}
+
 function createState(): RuntimeState {
 	return {
 		config: {
@@ -21,11 +46,13 @@ function createState(): RuntimeState {
 			mutatingTools: [],
 			includeModelDecisionSummary: false,
 			renderMode: "full",
+			enforcementMode: "visible_in_current_context",
 		},
-		rules: [placementRule],
+		rules: [placementRule, presentationRule],
 		diagnostics: [],
 		armedScopes: new Set<string>(),
 		pendingScopes: new Set<string>(),
+		lastVisibleScopes: new Set<string>(),
 		readPaths: new Set<string>(),
 	};
 }
@@ -88,6 +115,7 @@ describe("runtime state", () => {
 			mutatingTools: [{ toolName: "edit", pathFields: ["path"] }],
 			includeModelDecisionSummary: false,
 			renderMode: "full" as const,
+			enforcementMode: "visible_in_current_context" as const,
 		};
 		const paths = extractMutationPaths(
 			"edit",
@@ -97,5 +125,76 @@ describe("runtime state", () => {
 		);
 
 		expect(paths).toEqual(["Assets/Scripts/Runtime/Placement/A.cs"]);
+	});
+
+	it("blocks mutation when scope is armed and file was read but rules are not visible", () => {
+		const projectDir = createTempProject();
+		const filePath = "Assets/Scripts/Runtime/Placement/Foo.cs";
+		createExistingFile(projectDir, filePath);
+		const state = createState();
+		armScopes(state, ["runtime-placement"]);
+		rememberReadPaths(state, [filePath]);
+
+		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+
+		expect(gate.allowed).toBe(false);
+		expect(gate.missingScopes).toEqual([]);
+		expect(gate.unreadScopedPaths).toEqual([]);
+		expect(gate.missingVisibleScopes).toEqual(["runtime-placement"]);
+	});
+
+	it("allows mutation only when the matching scope is visible", () => {
+		const projectDir = createTempProject();
+		const filePath = "Assets/Scripts/Runtime/Placement/Foo.cs";
+		createExistingFile(projectDir, filePath);
+		const state = createState();
+		armScopes(state, ["runtime-placement"]);
+		rememberReadPaths(state, [filePath]);
+		state.lastVisibleScopes.add("runtime-placement");
+
+		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+
+		expect(gate.allowed).toBe(true);
+		expect(gate.missingVisibleScopes).toEqual([]);
+	});
+
+	it("requires visible rules for new scoped file creation", () => {
+		const projectDir = createTempProject();
+		const filePath = "Assets/Scripts/Runtime/Placement/NewFoo.cs";
+		const state = createState();
+		armScopes(state, ["runtime-placement"]);
+
+		expect(evaluateScopedMutationGate([filePath], state, projectDir).allowed).toBe(false);
+
+		state.lastVisibleScopes.add("runtime-placement");
+		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+
+		expect(gate.allowed).toBe(true);
+		expect(gate.unreadScopedPaths).toEqual([]);
+		expect(gate.targetPathExists).toBe(false);
+	});
+
+	it("blocks when a different scope is visible than the target requires", () => {
+		const projectDir = createTempProject();
+		const filePath = "Assets/Scripts/Runtime/Presentation/Hud.cs";
+		createExistingFile(projectDir, filePath);
+		const state = createState();
+		armScopes(state, ["runtime-presentation"]);
+		rememberReadPaths(state, [filePath]);
+		state.lastVisibleScopes.add("runtime-placement");
+
+		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+
+		expect(gate.allowed).toBe(false);
+		expect(gate.missingVisibleScopes).toEqual(["runtime-presentation"]);
+	});
+
+	it("clears visible scopes for a provider context with no pending rules", () => {
+		const state = createState();
+		state.lastVisibleScopes.add("runtime-placement");
+
+		clearLastVisibleScopes(state);
+
+		expect([...state.lastVisibleScopes]).toEqual([]);
 	});
 });

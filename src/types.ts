@@ -29,11 +29,14 @@ export interface RuleLoadResult {
 
 export type RuleRenderMode = "full" | "condensed";
 
+export type ScopedRuleEnforcementMode = "armed_scope" | "visible_in_current_context";
+
 export interface ScopedRulesConfig {
 	ruleDirs: string[];
 	mutatingTools: ToolMutationSpec[];
 	includeModelDecisionSummary: boolean;
 	renderMode: RuleRenderMode;
+	enforcementMode: ScopedRuleEnforcementMode;
 }
 
 export type ScopedTransitionNotice = {
@@ -41,11 +44,22 @@ export type ScopedTransitionNotice = {
 	targetPath: string;
 	scopes: string[];
 	unreadPaths: string[];
+	targetExists?: boolean;
+	visibilityRequired?: boolean;
 } | {
 	kind: "armed";
 	targetPath: string;
 	scopes: string[];
 };
+
+export interface ScopedMutationGateResult {
+	allowed: boolean;
+	missingScopes: string[];
+	unreadScopedPaths: string[];
+	missingVisibleScopes: string[];
+	queuedScopes: string[];
+	targetPathExists: boolean;
+}
 
 export interface RuntimeState {
 	config: ScopedRulesConfig;
@@ -53,10 +67,14 @@ export interface RuntimeState {
 	diagnostics: RuleDiagnostic[];
 	armedScopes: Set<string>;
 	pendingScopes: Set<string>;
+	lastVisibleScopes: Set<string>;
+	lastVisibleRuleMessageId?: number;
 	readPaths: Set<string>;
 	lastBlockedPath?: string;
 	lastBlockedScopes?: string[];
 	lastBlockedUnreadPaths?: string[];
+	lastBlockedTargetExists?: boolean;
+	lastBlockedVisibilityRequired?: boolean;
 	lastActivatedPath?: string;
 	lastActivatedScopes?: string[];
 }

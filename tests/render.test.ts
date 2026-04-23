@@ -27,7 +27,7 @@ const sampleRule: Rule = {
 describe("render helpers", () => {
 	it("creates a scoped mutation primer for glob rules", () => {
 		const prompt = buildScopedMutationPrimer([sampleRule]);
-		expect(prompt).toContain("Before mutating a file that matches one of these rules, read that file first");
+		expect(prompt).toContain("Only call edit/write from a model step where the matching scoped rules are visible.");
 		expect(prompt).toContain("runtime-placement");
 		expect(prompt).toContain("Assets/Scripts/Runtime/Placement/**/*.cs");
 	});
@@ -63,10 +63,22 @@ describe("render helpers", () => {
 			"Assets/Scripts/Runtime/Placement/NewFile.cs",
 			["runtime-placement"],
 			[],
+			{ targetExists: false, visibilityRequired: true },
 		);
 		expect(reason).toContain("no exact file read is required because the target path does not exist yet");
 		expect(reason).not.toContain("read exact file: Assets/Scripts/Runtime/Placement/NewFile.cs");
 		expect(reason).toContain('"requiredReads": []');
+	});
+
+	it("does not describe an already-read existing target as a new file", () => {
+		const reason = buildScopedBlockedReason(
+			"Assets/Scripts/Runtime/Placement/A.cs",
+			["runtime-placement"],
+			[],
+			{ targetExists: true, visibilityRequired: true },
+		);
+		expect(reason).toContain("exact file read is already satisfied or not required for this target");
+		expect(reason).not.toContain("target path does not exist yet");
 	});
 
 	it("removes boilerplate prose and keeps concrete guidance in condensed mode", () => {
@@ -108,6 +120,7 @@ describe("render helpers", () => {
 			targetPath: "Assets/Scripts/Runtime/Placement/NewFile.cs",
 			scopes: ["runtime-placement"],
 			unreadPaths: [],
+			targetExists: false,
 		});
 		expect(message.content).toContain("no exact file read is required because the target path does not exist yet");
 		expect(message.content).toContain("plans the file creation");

@@ -15,6 +15,7 @@ describe("loadConfig", () => {
 
 		expect(config.ruleDirs).toEqual([".agents/rules", ".pi/rules"]);
 		expect(config.renderMode).toBe("full");
+		expect(config.enforcementMode).toBe("visible_in_current_context");
 		expect(config.mutatingTools.map((tool) => tool.toolName)).toEqual(["edit", "write"]);
 	});
 
@@ -25,6 +26,7 @@ describe("loadConfig", () => {
 			join(projectDir, ".pi", "scoped-rules.json"),
 			JSON.stringify({
 				renderMode: "condensed",
+				enforcementMode: "armed_scope",
 				mutatingTools: [
 					{ toolName: "edit", pathFields: ["path"] },
 					{ toolName: "custom_mutator", pathFields: ["filePath", "files"] },
@@ -34,6 +36,7 @@ describe("loadConfig", () => {
 
 		const config = loadConfig(projectDir);
 		expect(config.renderMode).toBe("condensed");
+		expect(config.enforcementMode).toBe("armed_scope");
 		expect(config.mutatingTools.map((tool) => tool.toolName)).toEqual(["edit", "custom_mutator"]);
 	});
 });

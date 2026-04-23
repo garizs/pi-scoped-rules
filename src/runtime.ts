@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { normalize, relative, resolve } from "node:path";
-import type { ScopedRulesConfig, Rule, RuntimeState, ToolMutationSpec } from "./types.js";
+import type { ScopedMutationGateResult, ScopedRulesConfig, Rule, RuntimeState, ToolMutationSpec } from "./types.js";
 import { matchesAnyGlob } from "./glob.js";
 
 function extractStringValues(value: unknown): string[] {
@@ -98,7 +98,13 @@ export function getMatchingScopesForPaths(paths: string[], rules: Rule[]): strin
 	return [...scopes].sort();
 }
 
-function pathExists(filePath: string, cwd: string): boolean {
+export function getMissingVisibleScopesForPaths(paths: string[], rules: Rule[], lastVisibleScopes: Set<string>): string[] {
+	return getMatchingScopesForPaths(paths, rules)
+		.filter((scope) => !lastVisibleScopes.has(scope))
+		.sort();
+}
+
+export function pathExists(filePath: string, cwd: string): boolean {
 	const resolvedPath = filePath.startsWith("/") ? filePath : resolve(cwd, filePath);
 	return existsSync(resolvedPath);
 }
@@ -114,6 +120,30 @@ export function getUnreadScopedPaths(
 		.filter((filePath) => pathExists(filePath, cwd))
 		.filter((filePath) => !readPaths.has(filePath))
 		.sort();
+}
+
+export function evaluateScopedMutationGate(paths: string[], state: RuntimeState, cwd: string): ScopedMutationGateResult {
+	const missingScopes = getMissingScopesForPaths(paths, state.rules, state.armedScopes);
+	const unreadScopedPaths = getUnreadScopedPaths(paths, state.rules, state.readPaths, cwd);
+	const missingVisibleScopes = state.config.enforcementMode === "visible_in_current_context"
+		? getMissingVisibleScopesForPaths(paths, state.rules, state.lastVisibleScopes)
+		: [];
+	const queuedScopes = [
+		...new Set([
+			...missingScopes,
+			...missingVisibleScopes,
+			...getMatchingScopesForPaths(unreadScopedPaths, state.rules),
+		]),
+	].sort();
+
+	return {
+		allowed: missingScopes.length === 0 && unreadScopedPaths.length === 0 && missingVisibleScopes.length === 0,
+		missingScopes,
+		unreadScopedPaths,
+		missingVisibleScopes,
+		queuedScopes,
+		targetPathExists: paths.length > 0 ? pathExists(paths[0] ?? "", cwd) : false,
+	};
 }
 
 export function queuePendingScopes(state: RuntimeState, scopes: string[]): void {
@@ -143,6 +173,19 @@ export function clearPendingScopes(state: RuntimeState): void {
 	state.pendingScopes.clear();
 }
 
+export function clearLastVisibleScopes(state: RuntimeState): void {
+	state.lastVisibleScopes.clear();
+	state.lastVisibleRuleMessageId = undefined;
+}
+
+export function rememberVisibleScopedRules(state: RuntimeState, rules: Rule[]): void {
+	clearLastVisibleScopes(state);
+	for (const rule of rules) {
+		state.lastVisibleScopes.add(rule.scope);
+	}
+	state.lastVisibleRuleMessageId = Date.now();
+}
+
 export function rememberReadPaths(state: RuntimeState, paths: string[]): void {
 	for (const path of paths) {
 		state.readPaths.add(path);
@@ -152,10 +195,14 @@ export function rememberReadPaths(state: RuntimeState, paths: string[]): void {
 export function clearArmedScopes(state: RuntimeState): void {
 	state.armedScopes.clear();
 	state.pendingScopes.clear();
+	state.lastVisibleScopes.clear();
+	state.lastVisibleRuleMessageId = undefined;
 	state.readPaths.clear();
 	state.lastBlockedPath = undefined;
 	state.lastBlockedScopes = undefined;
 	state.lastBlockedUnreadPaths = undefined;
+	state.lastBlockedTargetExists = undefined;
+	state.lastBlockedVisibilityRequired = undefined;
 	state.lastActivatedPath = undefined;
 	state.lastActivatedScopes = undefined;
 }
