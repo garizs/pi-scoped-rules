@@ -75,6 +75,7 @@ export interface RuntimeState {
 	lastBlockedUnreadPaths?: string[];
 	lastBlockedTargetExists?: boolean;
 	lastBlockedVisibilityRequired?: boolean;
+	repeatedUnreadMutationBlockCount?: number;
 	lastActivatedPath?: string;
 	lastActivatedScopes?: string[];
 }

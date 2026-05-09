@@ -123,21 +123,19 @@ export function getUnreadScopedPaths(
 }
 
 export function evaluateScopedMutationGate(paths: string[], state: RuntimeState, cwd: string): ScopedMutationGateResult {
+	const matchingScopes = getMatchingScopesForPaths(paths, state.rules);
 	const missingScopes = getMissingScopesForPaths(paths, state.rules, state.armedScopes);
 	const unreadScopedPaths = getUnreadScopedPaths(paths, state.rules, state.readPaths, cwd);
 	const missingVisibleScopes = state.config.enforcementMode === "visible_in_current_context"
 		? getMissingVisibleScopesForPaths(paths, state.rules, state.lastVisibleScopes)
 		: [];
-	const queuedScopes = [
-		...new Set([
-			...missingScopes,
-			...missingVisibleScopes,
-			...getMatchingScopesForPaths(unreadScopedPaths, state.rules),
-		]),
-	].sort();
+	const allowed = missingScopes.length === 0
+		&& unreadScopedPaths.length === 0
+		&& missingVisibleScopes.length === 0;
+	const queuedScopes = allowed ? [] : matchingScopes;
 
 	return {
-		allowed: missingScopes.length === 0 && unreadScopedPaths.length === 0 && missingVisibleScopes.length === 0,
+		allowed,
 		missingScopes,
 		unreadScopedPaths,
 		missingVisibleScopes,
@@ -203,6 +201,7 @@ export function clearArmedScopes(state: RuntimeState): void {
 	state.lastBlockedUnreadPaths = undefined;
 	state.lastBlockedTargetExists = undefined;
 	state.lastBlockedVisibilityRequired = undefined;
+	state.repeatedUnreadMutationBlockCount = undefined;
 	state.lastActivatedPath = undefined;
 	state.lastActivatedScopes = undefined;
 }

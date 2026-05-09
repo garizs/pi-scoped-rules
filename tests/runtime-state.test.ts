@@ -5,6 +5,18 @@ import { dirname, join } from "node:path";
 import { armScopes, clearLastVisibleScopes, clearPendingScopes, evaluateScopedMutationGate, extractMutationPaths, getInactiveMatchingScopesForPaths, getMissingScopesForPaths, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "../src/runtime.js";
 import type { RuntimeState, Rule } from "../src/types.js";
 
+const csharpBaselineRule: Rule = {
+	id: "csharp-baseline",
+	name: "csharp-baseline",
+	scope: "csharp-baseline",
+	trigger: "glob",
+	description: "C# baseline rules",
+	globs: ["Assets/Scripts/**/*.cs"],
+	content: "- Keep C# code consistent.",
+	sourcePath: "/tmp/csharp-baseline.mdc",
+	relativePath: ".agents/rules/csharp-baseline.mdc",
+};
+
 const placementRule: Rule = {
 	id: "placement",
 	name: "placement",
@@ -156,6 +168,27 @@ describe("runtime state", () => {
 
 		expect(gate.allowed).toBe(true);
 		expect(gate.missingVisibleScopes).toEqual([]);
+	});
+
+	it("queues every matching scope when overlapping scoped rules block mutation", () => {
+		const projectDir = createTempProject();
+		const filePath = "Assets/Scripts/Runtime/Placement/Foo.cs";
+		createExistingFile(projectDir, filePath);
+		const state = createState();
+		state.rules = [csharpBaselineRule, placementRule];
+		armScopes(state, ["runtime-placement"]);
+		rememberReadPaths(state, [filePath]);
+		state.lastVisibleScopes.add("runtime-placement");
+
+		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+
+		expect(gate.allowed).toBe(false);
+		expect(gate.missingScopes).toEqual(["csharp-baseline"]);
+		expect(gate.missingVisibleScopes).toEqual(["csharp-baseline"]);
+		expect(gate.queuedScopes).toEqual([
+			"csharp-baseline",
+			"runtime-placement",
+		]);
 	});
 
 	it("requires visible rules for new scoped file creation", () => {

@@ -26,6 +26,14 @@ function createInitialState(): RuntimeState {
 	};
 }
 
+function stringArraysEqual(left: string[] | undefined, right: string[]): boolean {
+	if (!left || left.length !== right.length) {
+		return false;
+	}
+
+	return left.every((value, index) => value === right[index]);
+}
+
 export default function piScopedRules(pi: ExtensionAPI) {
 	const state = createInitialState();
 
@@ -159,8 +167,19 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 		const gate = evaluateScopedMutationGate(mutationPaths, state, ctx.cwd);
 		if (gate.allowed) {
+			state.repeatedUnreadMutationBlockCount = undefined;
 			return;
 		}
+
+		const repeatedUnreadBlock = gate.unreadScopedPaths.length > 0
+			&& state.lastBlockedPath === mutationPaths[0]
+			&& stringArraysEqual(state.lastBlockedUnreadPaths, gate.unreadScopedPaths);
+		state.repeatedUnreadMutationBlockCount = repeatedUnreadBlock
+			? (state.repeatedUnreadMutationBlockCount ?? 1) + 1
+			: gate.unreadScopedPaths.length > 0
+				? 1
+				: undefined;
+		const shouldAbortLoop = (state.repeatedUnreadMutationBlockCount ?? 0) >= 2;
 
 		queuePendingScopes(state, gate.queuedScopes);
 		if (gate.unreadScopedPaths.length === 0) {
@@ -176,14 +195,27 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Scoped rules queued for ${mutationPaths[0]}: ${gate.queuedScopes.join(", ")}`, "info");
+			if (shouldAbortLoop) {
+				ctx.ui.notify(
+					`Scoped rules aborting repeated unread mutation loop for ${mutationPaths[0]}`,
+					"error",
+				);
+			}
 		}
 
+		if (shouldAbortLoop) {
+			ctx.abort();
+		}
+
+		const reason = buildScopedBlockedReason(mutationPaths[0], gate.queuedScopes, gate.unreadScopedPaths, {
+			targetExists: gate.targetPathExists,
+			visibilityRequired: gate.missingVisibleScopes.length > 0,
+		});
 		return {
 			block: true,
-			reason: buildScopedBlockedReason(mutationPaths[0], gate.queuedScopes, gate.unreadScopedPaths, {
-				targetExists: gate.targetPathExists,
-				visibilityRequired: gate.missingVisibleScopes.length > 0,
-			}),
+			reason: shouldAbortLoop
+				? `REPEATED_SCOPED_RULES_BLOCKED_MUTATION\nstatus: agent_turn_aborted_to_prevent_loop\nThe agent repeatedly attempted edit/write without the required exact read. The next action must be a read tool call for: ${gate.unreadScopedPaths.join(", ")}\n\n${reason}`
+				: reason,
 		};
 	});
 
@@ -212,16 +244,14 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		state.lastBlockedUnreadPaths = undefined;
 		state.lastBlockedTargetExists = undefined;
 		state.lastBlockedVisibilityRequired = undefined;
+		state.repeatedUnreadMutationBlockCount = undefined;
 		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
 		if (activatedScopes.length > 0) {
 			armScopes(state, activatedScopes);
-			state.lastActivatedPath = readPaths[0];
-			state.lastActivatedScopes = activatedScopes;
-		} else {
-			state.lastActivatedPath = readPaths[0];
-			state.lastActivatedScopes = matchingScopes;
-			queuePendingScopes(state, matchingScopes);
 		}
+		state.lastActivatedPath = readPaths[0];
+		state.lastActivatedScopes = matchingScopes;
+		queuePendingScopes(state, matchingScopes);
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(`Scoped rules refreshed from read ${readPaths[0]}: ${matchingScopes.join(", ")}`, "info");

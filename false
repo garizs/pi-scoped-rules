@@ -1,0 +1,85 @@
+Could not write `/Users/ivankolesnikov/projects/pi-scoped-rules/false`: no write/edit tool is available in this subagent, and shell file writing was blocked by runtime policy. Findings:
+
+## Inherited decisions
+
+- Keep lazy injection after blocked `edit/write`.
+- Remove mandatory exact `read`.
+- No proactive injection on arbitrary `read`.
+- Accept first wasted diff.
+- Applied scoped mutations require matching rules visible in the request that generated the mutation.
+- Use nonce confirmation via `before_provider_request`.
+- No `.mdc` rules => no-op.
+- Block reason must be neutral control flow, not “error”.
+
+## Diagnosis
+
+The design is directionally correct, but the guarantee must be narrowed:
+
+> The extension can enforce scoped-rule **visibility** for configured mutating tools. It cannot guarantee semantic compliance with rules.
+
+Main remaining risks:
+
+- stale `lastVisibleScopes`;
+- `before_provider_request` ordering;
+- bash/custom mutator bypass;
+- parallel tool calls;
+- repeated block loops if nonce injection fails;
+- existing-file `write` without read;
+- huge matched rules in one injection.
+
+## Drift / contradiction check
+
+- “Final provider request confirmed” is too strong. Pi runs `before_provider_request` handlers in extension order; later extensions can still mutate/remove payload. The extension only confirms payload at its own hook point unless loaded last.
+- “No rules => no-op” must not include invalid rule files. If `.mdc` files exist but are invalid, block mutating tools with diagnostics.
+- “Rules enforced” should be documented as “rules were visible to the model when allowed mutation was generated.”
+- If rules are one-shot and the model uses the rule-visible call for `read/grep`, the later edit will be blocked again. Safe, but can create extra loops unless handled.
+
+## Recommendation
+
+Use provider-call-scoped visibility state:
+
+- `providerCallSeq`
+- `preparedInjection: { callId, nonce, scopes, paths }`
+- `confirmedVisibility: { callId, scopes }`
+- `pendingScopes`
+- optional `activeIntent` for bounded reinjection after a blocked mutation.
+
+### Robust flow
+
+1. `tool_call(edit/write)` extracts paths.
+2. If no valid scoped rules and no diagnostics: no-op.
+3. If diagnostics: block mutating tools.
+4. If path matches no glob: allow.
+5. If matching scopes are confirmed for the current provider call: allow.
+6. Else:
+   - block with neutral `SCOPED_RULES_PREPARED`;
+   - queue all matching scopes;
+   - do not include rule bodies or nonce in block reason.
+7. Next `context` injects hidden scoped message with nonce and rule bodies.
+8. `before_provider_request` confirms nonce exists in observed payload.
+9. Next `tool_call` is allowed only if all matching scopes are in `confirmedVisibility` for that call.
+10. On provider call with no injection, reset `confirmedVisibility` to empty to prevent stale allowance.
+
+## Edge cases to explicitly handle
+
+- Multiple sibling blocked tool calls: queue union of scopes; don’t abort on first normal block.
+- Same block after nonce failed confirmation: hard stop with `SCOPED_RULES_VISIBILITY_FAILED`, don’t loop.
+- Intermediate `read/grep` after injection: either accept another later block or boundedly reinject active scopes 1–2 times.
+- Bash writes bypass gate. Document clearly or add optional bash guard/disable bash.
+- Custom mutating tools bypass unless configured.
+- Existing-file `write` without read is allowed by this model but unsafe; consider optional safeguard.
+- Symlinks: match both lexical path and realpath-relative path; require union of scopes.
+- Huge rules: use deterministic ordering and max injection budget; block with diagnostics rather than silently truncating mandatory rules.
+- Always-on/model-decision rules should not affect scoped mutation gate unless explicitly designed.
+
+## Need from main agent
+
+Decide:
+
+1. Add bounded active-intent reinjection? Recommended: yes, budget `1` or `2`, only after blocked scoped mutation.
+2. Add optional existing-file `write` safeguard?
+3. How strict to be about bash bypass: document only, heuristic guard, or recommend disabling bash for strict enforcement.
+
+## Suggested execution prompt
+
+No separate handoff warranted from this review. If implementing: replace read/armed-scope gating with nonce-confirmed provider-call visibility gating, add stale-state clearing, neutral block reasons, diagnostics/no-op distinction, loop hard-stop, and tests for stale visibility, missing nonce, overlapping scopes, no-rule no-op, invalid-rule blocking, parallel blocked calls, and intermediate inspection behavior.

@@ -103,15 +103,17 @@ describe("render helpers", () => {
 		expect(message.content).toContain("- Separate preview from commit.");
 	});
 
-	it("includes blocked transition instructions in scoped context messages", () => {
+	it("includes read-first blocked transition instructions in scoped context messages", () => {
 		const message = buildScopedContextMessage([sampleRule], "full", {
 			kind: "blocked",
 			targetPath: "Assets/Scripts/Runtime/Placement/A.cs",
 			scopes: ["runtime-placement"],
 			unreadPaths: ["Assets/Scripts/Runtime/Placement/A.cs"],
 		});
-		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION BLOCKED]");
-		expect(message.content).toContain("do not retry the mutation in the same tool-calling message as the read");
+		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION BLOCKED - READ REQUIRED]");
+		expect(message.content).toContain("Do not call edit/write for the blocked path in this model step.");
+		expect(message.content).toContain("Visible scoped rules are not enough");
+		expect(message.content).toContain("read exact file: Assets/Scripts/Runtime/Placement/A.cs");
 	});
 
 	it("describes file-creation blocking without demanding a nonexistent read", () => {

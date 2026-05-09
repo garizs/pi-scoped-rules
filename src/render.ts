@@ -171,20 +171,29 @@ function buildScopedTransitionHeader(transition: ScopedTransitionNotice | undefi
 	}
 
 	if (transition.kind === "blocked") {
-		const readActions = transition.unreadPaths.length > 0
-			? [
+		if (transition.unreadPaths.length > 0) {
+			return [
+				"[SCOPED PROJECT RULES: MUTATION BLOCKED - READ REQUIRED]",
+				"The previous edit/write was blocked because the exact target file has not been read in this run.",
+				"Do not call edit/write for the blocked path in this model step.",
+				"Visible scoped rules are not enough: the mutation gate will continue blocking until the exact read succeeds.",
+				`Blocked path: ${transition.targetPath}`,
+				`Scopes: ${transition.scopes.join(", ")}`,
+				"Required next tool call(s):",
 				...transition.unreadPaths.map((path) => `- read exact file: ${path}`),
-				"- do not retry the mutation in the same tool-calling message as the read",
+				"After the read result, wait for the next model step with scoped rules visible before retrying edit/write.",
+			].join("\n");
+		}
+
+		const readActions = transition.targetExists === false
+			? [
+				"- no exact file read is required because the target path does not exist yet",
+				"- use the scoped rules below on this model step that plans the file creation",
 			]
-			: transition.targetExists === false
-				? [
-					"- no exact file read is required because the target path does not exist yet",
-					"- use the scoped rules below on this model step that plans the file creation",
-				]
-				: [
-					"- exact file read is already satisfied or not required for this target",
-					"- use the scoped rules below on this model step that plans the mutation",
-				];
+			: [
+				"- exact file read is already satisfied or not required for this target",
+				"- use the scoped rules below on this model step that plans the mutation",
+			];
 		return [
 			"[SCOPED PROJECT RULES: MUTATION BLOCKED]",
 			...mandatoryGuidance,
