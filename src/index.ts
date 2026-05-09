@@ -1,9 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.js";
 import { loadRules } from "./loader.js";
-import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedBlockedReason, buildScopedContextMessage, buildScopedMutationPrimer, buildScopedReadPrimer, stripScopedContextMessages } from "./render.js";
-import { armScopes, clearArmedScopes, clearLastVisibleScopes, clearPendingScopes, evaluateScopedMutationGate, extractMutationPaths, getAlwaysOnRules, getGlobRules, getInactiveMatchingScopesForPaths, getMatchingScopesForPaths, getModelDecisionRules, getPendingScopedRules, queuePendingScopes, rememberReadPaths, rememberVisibleScopedRules } from "./runtime.js";
-import type { RuntimeState } from "./types.js";
+import { buildAlwaysOnPrompt, buildModelDecisionPrompt, buildScopedContextMessage, buildScopedMutationPrimer, buildScopedPreparedReason, buildScopedReadPrimer, buildScopedVisibilityFailureReason, redactBlockedMutationToolCalls, stripScopedContextMessages } from "./render.js";
+import { clearActiveIntentForMutation, clearPendingScopes, clearTransientRunState, confirmInflightInjection, createVisibilityFailureKey, evaluateScopedMutationGate, extractMutationPaths, getAlwaysOnRules, getGlobRules, getModelDecisionRules, getPendingScopedRules, getReinjectableIntentScopes, getRulesForScopes, queuePendingScopes, rememberBlockedToolCall, rememberInflightInjection, rememberVisibilityFailure, setActiveIntent, startProviderCall } from "./runtime.js";
+import type { RuntimeState, ScopedTransitionNotice } from "./types.js";
 
 function createInitialState(): RuntimeState {
 	return {
@@ -19,19 +20,35 @@ function createInitialState(): RuntimeState {
 		},
 		rules: [],
 		diagnostics: [],
-		armedScopes: new Set<string>(),
+		rulesRevision: "",
 		pendingScopes: new Set<string>(),
-		lastVisibleScopes: new Set<string>(),
-		readPaths: new Set<string>(),
+		providerCallSeq: 0,
+		blockedToolCalls: new Map(),
 	};
 }
 
-function stringArraysEqual(left: string[] | undefined, right: string[]): boolean {
-	if (!left || left.length !== right.length) {
-		return false;
-	}
+function hasAnyRuleFiles(state: RuntimeState): boolean {
+	return state.rules.length > 0 || state.diagnostics.length > 0;
+}
 
-	return left.every((value, index) => value === right[index]);
+function hasScopedMutationRules(state: RuntimeState): boolean {
+	return getGlobRules(state.rules).length > 0;
+}
+
+function isSubset(required: string[], available: string[]): boolean {
+	return required.every((scope) => available.includes(scope));
+}
+
+function safeStringifyPayload(payload: unknown): string {
+	try {
+		return JSON.stringify(payload);
+	} catch {
+		return "";
+	}
+}
+
+function createNonce(): string {
+	return `pi-scoped-rules:${randomUUID()}`;
 }
 
 export default function piScopedRules(pi: ExtensionAPI) {
@@ -42,10 +59,7 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		const result = loadRules(cwd, state.config);
 		state.rules = result.rules;
 		state.diagnostics = result.diagnostics;
-	}
-
-	function resetRunState(): void {
-		clearArmedScopes(state);
+		state.rulesRevision = result.revision;
 	}
 
 	function notifyRuleLoad(ctx: { hasUI: boolean; ui: { notify: (message: string, level: "info" | "error") => void } }): void {
@@ -63,25 +77,28 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		reloadProjectState(ctx.cwd);
-		resetRunState();
+		clearTransientRunState(state);
 		notifyRuleLoad(ctx);
 	});
 
 	pi.on("session_switch" as never, async (_event: unknown, ctx: ExtensionContext) => {
 		reloadProjectState(ctx.cwd);
-		resetRunState();
+		clearTransientRunState(state);
 		notifyRuleLoad(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
+		if (!hasAnyRuleFiles(state)) {
+			return;
+		}
 
 		const activeTools = new Set((event.systemPromptOptions.selectedTools ?? []).map((toolName) => toolName.trim()));
 		const hasActiveMutatingTools = state.config.mutatingTools.some((spec) => activeTools.has(spec.toolName));
 		const diagnosticsPrompt = state.diagnostics.length > 0
 			? hasActiveMutatingTools
-				? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls may be blocked until the rule files are fixed.`
-				: `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Scoped read guidance may be incomplete until the rule files are fixed.`
+				? `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Mutating tool calls are blocked until the rule files are fixed.`
+				: `\n\n## Scoped rule diagnostics\n\n${state.diagnostics.length} rule file(s) are invalid. Scoped rule guidance may be incomplete until the rule files are fixed.`
 			: "";
 		const globPrimer = hasActiveMutatingTools
 			? buildScopedMutationPrimer(getGlobRules(state.rules))
@@ -96,8 +113,8 @@ export default function piScopedRules(pi: ExtensionAPI) {
 		}
 
 		const intro = hasActiveMutatingTools
-			? "Project-specific scoped rules may be activated ephemerally after relevant reads and before mutating tool calls. Avoid repeating rule blobs in persistent conversation history."
-			: "Project-specific scoped rules may be activated ephemerally after relevant file reads so review and analysis stay file-aware without polluting persistent conversation history.";
+			? "Project-specific scoped rules are enforced lazily for matching mutating tool calls. Full scoped rules are injected ephemerally only after a matching mutation is paused, avoiding persistent history pollution."
+			: "Project-specific scoped rules are available for review and analysis without persistent scoped-rule history pollution.";
 
 		return {
 			systemPrompt:
@@ -110,33 +127,52 @@ export default function piScopedRules(pi: ExtensionAPI) {
 
 	pi.on("context", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
-		const pendingRules = getPendingScopedRules(state);
-		const messages = stripScopedContextMessages(event.messages);
-		clearLastVisibleScopes(state);
-		if (pendingRules.length === 0) {
+		const providerCallId = startProviderCall(state);
+		let messages = redactBlockedMutationToolCalls(stripScopedContextMessages(event.messages), state.blockedToolCalls);
+
+		if (!hasScopedMutationRules(state)) {
 			return { messages };
 		}
 
-		rememberVisibleScopedRules(state, pendingRules);
+		let scopesToInject = [...state.pendingScopes].sort();
+		if (scopesToInject.length === 0) {
+			scopesToInject = getReinjectableIntentScopes(state);
+		}
+		if (scopesToInject.length === 0) {
+			return { messages };
+		}
 
-		const transition = state.lastBlockedPath && state.lastBlockedScopes
+		const pendingRules = scopesToInject.length > 0
+			? getRulesForScopes(state, scopesToInject)
+			: getPendingScopedRules(state);
+		if (pendingRules.length === 0) {
+			clearPendingScopes(state);
+			return { messages };
+		}
+
+		const nonce = createNonce();
+		rememberInflightInjection(state, {
+			providerCallId,
+			nonce,
+			scopes: [...new Set(pendingRules.map((rule) => rule.scope))].sort(),
+			rulesRevision: state.rulesRevision,
+		});
+
+		const transition: ScopedTransitionNotice | undefined = state.lastBlockedPath && state.lastBlockedScopes
 			? {
-				kind: "blocked" as const,
+				kind: "blocked",
 				targetPath: state.lastBlockedPath,
 				scopes: state.lastBlockedScopes,
-				unreadPaths: state.lastBlockedUnreadPaths ?? [],
-				targetExists: state.lastBlockedTargetExists,
-				visibilityRequired: state.lastBlockedVisibilityRequired,
 			}
-			: state.lastActivatedPath && state.lastActivatedScopes
+			: state.lastPreparedPath && state.lastPreparedScopes
 				? {
-					kind: "armed" as const,
-					targetPath: state.lastActivatedPath,
-					scopes: state.lastActivatedScopes,
+					kind: "prepared",
+					targetPath: state.lastPreparedPath,
+					scopes: state.lastPreparedScopes,
 				}
 				: undefined;
 
-		messages.push(buildScopedContextMessage(pendingRules, state.config.renderMode, transition));
+		messages.push(buildScopedContextMessage(pendingRules, state.config.renderMode, nonce, transition));
 		if (ctx.hasUI) {
 			const injectedScopes = [...new Set(pendingRules.map((rule) => rule.scope))].sort();
 			ctx.ui.notify(
@@ -145,7 +181,18 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			);
 		}
 		clearPendingScopes(state);
+		state.lastPreparedPath = state.lastBlockedPath;
+		state.lastPreparedScopes = state.lastBlockedScopes;
+		state.lastBlockedPath = undefined;
+		state.lastBlockedScopes = undefined;
 		return { messages };
+	});
+
+	pi.on("before_provider_request", async (event) => {
+		if (!state.inflightInjection || state.inflightInjection.providerCallId !== state.currentProviderCallId) {
+			return;
+		}
+		confirmInflightInjection(state, safeStringifyPayload(event.payload));
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -165,118 +212,84 @@ export default function piScopedRules(pi: ExtensionAPI) {
 			};
 		}
 
-		const gate = evaluateScopedMutationGate(mutationPaths, state, ctx.cwd);
-		if (gate.allowed) {
-			state.repeatedUnreadMutationBlockCount = undefined;
+		if (!hasScopedMutationRules(state)) {
 			return;
 		}
 
-		const repeatedUnreadBlock = gate.unreadScopedPaths.length > 0
-			&& state.lastBlockedPath === mutationPaths[0]
-			&& stringArraysEqual(state.lastBlockedUnreadPaths, gate.unreadScopedPaths);
-		state.repeatedUnreadMutationBlockCount = repeatedUnreadBlock
-			? (state.repeatedUnreadMutationBlockCount ?? 1) + 1
-			: gate.unreadScopedPaths.length > 0
-				? 1
-				: undefined;
-		const shouldAbortLoop = (state.repeatedUnreadMutationBlockCount ?? 0) >= 2;
-
-		queuePendingScopes(state, gate.queuedScopes);
-		if (gate.unreadScopedPaths.length === 0) {
-			armScopes(state, gate.queuedScopes);
+		const gate = evaluateScopedMutationGate(mutationPaths, state, ctx.cwd);
+		if (gate.allowed) {
+			clearActiveIntentForMutation(state, mutationPaths, gate.matchingScopes);
+			state.lastVisibilityFailureKey = undefined;
+			state.visibilityFailureCount = undefined;
+			return;
 		}
-		state.lastActivatedPath = undefined;
-		state.lastActivatedScopes = undefined;
+
+		queuePendingScopes(state, gate.matchingScopes);
+		setActiveIntent(state, mutationPaths, gate.matchingScopes);
+		rememberBlockedToolCall(state, event.toolCallId, event.toolName, mutationPaths, gate.matchingScopes);
+		state.lastPreparedPath = undefined;
+		state.lastPreparedScopes = undefined;
 		state.lastBlockedPath = mutationPaths[0];
-		state.lastBlockedScopes = gate.queuedScopes;
-		state.lastBlockedUnreadPaths = gate.unreadScopedPaths;
-		state.lastBlockedTargetExists = gate.targetPathExists;
-		state.lastBlockedVisibilityRequired = gate.missingVisibleScopes.length > 0;
+		state.lastBlockedScopes = gate.matchingScopes;
+
+		if (gate.reason === "visibility_failed" || gate.reason === "rules_changed") {
+			const failureKey = createVisibilityFailureKey(mutationPaths, gate.matchingScopes);
+			const failureCount = rememberVisibilityFailure(state, failureKey);
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Scoped rules visibility failed for ${mutationPaths[0]}: ${gate.matchingScopes.join(", ")}`, "error");
+			}
+			if (failureCount >= 1) {
+				ctx.abort();
+			}
+			return {
+				block: true,
+				reason: buildScopedVisibilityFailureReason(mutationPaths[0] ?? "(unknown)", gate.matchingScopes),
+			};
+		}
 
 		if (ctx.hasUI) {
-			ctx.ui.notify(`Scoped rules queued for ${mutationPaths[0]}: ${gate.queuedScopes.join(", ")}`, "info");
-			if (shouldAbortLoop) {
-				ctx.ui.notify(
-					`Scoped rules aborting repeated unread mutation loop for ${mutationPaths[0]}`,
-					"error",
-				);
-			}
+			ctx.ui.notify(`Scoped rules prepared for ${mutationPaths[0]}: ${gate.matchingScopes.join(", ")}`, "info");
 		}
 
-		if (shouldAbortLoop) {
-			ctx.abort();
-		}
-
-		const reason = buildScopedBlockedReason(mutationPaths[0], gate.queuedScopes, gate.unreadScopedPaths, {
-			targetExists: gate.targetPathExists,
-			visibilityRequired: gate.missingVisibleScopes.length > 0,
-		});
 		return {
 			block: true,
-			reason: shouldAbortLoop
-				? `REPEATED_SCOPED_RULES_BLOCKED_MUTATION\nstatus: agent_turn_aborted_to_prevent_loop\nThe agent repeatedly attempted edit/write without the required exact read. The next action must be a read tool call for: ${gate.unreadScopedPaths.join(", ")}\n\n${reason}`
-				: reason,
+			reason: buildScopedPreparedReason(mutationPaths[0] ?? "(unknown)", gate.matchingScopes),
 		};
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
 		reloadProjectState(ctx.cwd);
-		if (event.toolName !== "read" || event.isError) {
+		if (event.isError) {
 			return;
 		}
 
-		const readPaths = extractMutationPaths("write", event.input as Record<string, unknown>, {
-			...state.config,
-			mutatingTools: [{ toolName: "write", pathFields: ["path"] }],
-		}, ctx.cwd);
-		if (readPaths.length === 0) {
+		const mutationPaths = extractMutationPaths(event.toolName, event.input as Record<string, unknown>, state.config, ctx.cwd);
+		if (mutationPaths.length === 0 || !state.activeIntent) {
 			return;
 		}
 
-		const matchingScopes = getMatchingScopesForPaths(readPaths, state.rules);
-		if (matchingScopes.length === 0) {
-			return;
-		}
-
-		rememberReadPaths(state, readPaths);
-		state.lastBlockedPath = undefined;
-		state.lastBlockedScopes = undefined;
-		state.lastBlockedUnreadPaths = undefined;
-		state.lastBlockedTargetExists = undefined;
-		state.lastBlockedVisibilityRequired = undefined;
-		state.repeatedUnreadMutationBlockCount = undefined;
-		const activatedScopes = getInactiveMatchingScopesForPaths(readPaths, state.rules, state.armedScopes);
-		if (activatedScopes.length > 0) {
-			armScopes(state, activatedScopes);
-		}
-		state.lastActivatedPath = readPaths[0];
-		state.lastActivatedScopes = matchingScopes;
-		queuePendingScopes(state, matchingScopes);
-
-		if (ctx.hasUI) {
-			ctx.ui.notify(`Scoped rules refreshed from read ${readPaths[0]}: ${matchingScopes.join(", ")}`, "info");
-		}
+		const gate = evaluateScopedMutationGate(mutationPaths, state, ctx.cwd);
+		clearActiveIntentForMutation(state, mutationPaths, gate.matchingScopes);
 	});
 
 	pi.on("agent_end", async () => {
-		clearArmedScopes(state);
+		clearTransientRunState(state);
 	});
 
 	pi.registerCommand("scoped-rules-status", {
-		description: "Show loaded scoped rules and currently armed/pending scopes",
+		description: "Show loaded scoped rules and currently pending/visible scopes",
 		handler: async (_args, ctx) => {
 			reloadProjectState(ctx.cwd);
 			if (!ctx.hasUI) {
 				return;
 			}
 
-			const armed = state.armedScopes.size > 0 ? [...state.armedScopes].join(", ") : "none";
 			const pending = state.pendingScopes.size > 0 ? [...state.pendingScopes].join(", ") : "none";
-			const visible = state.lastVisibleScopes.size > 0 ? [...state.lastVisibleScopes].join(", ") : "none";
-			const readPaths = state.readPaths.size > 0 ? [...state.readPaths].join(", ") : "none";
+			const visible = state.confirmedVisibility ? state.confirmedVisibility.scopes.join(", ") : "none";
+			const intent = state.activeIntent ? `${state.activeIntent.paths.join(", ")} -> ${state.activeIntent.scopes.join(", ")}` : "none";
 			const rulesList = state.rules.map((rule) => `${rule.name} [${rule.trigger}] -> ${rule.scope}`).join("\n") || "(none)";
 			const diagnostics = state.diagnostics.map((entry) => `- ${entry.relativePath}: ${entry.message}`).join("\n") || "(none)";
-			ctx.ui.notify(`Enforcement mode: ${state.config.enforcementMode}\nArmed scopes: ${armed}\nPending one-shot scopes: ${pending}\nVisible in last provider call: ${visible}\nRead scoped files: ${readPaths}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
+			ctx.ui.notify(`Enforcement mode: ${state.config.enforcementMode}\nRules revision: ${state.rulesRevision}\nPending one-shot scopes: ${pending}\nVisible in current provider call: ${visible}\nActive mutation intent: ${intent}\nRules:\n${rulesList}\nDiagnostics:\n${diagnostics}`, "info");
 		},
 	});
 }

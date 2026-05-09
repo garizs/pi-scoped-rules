@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadRules } from "../src/loader.js";
-import { getMissingScopesForPaths } from "../src/runtime.js";
+import { getMatchingScopesForPaths } from "../src/runtime.js";
 
 function createTempProject(): string {
 	return mkdtempSync(join(tmpdir(), "pi-scoped-rules-loader-"));
@@ -99,15 +99,14 @@ describe("loadRules + scope resolution", () => {
 			enforcementMode: "visible_in_current_context",
 		});
 
-		const missingScopes = getMissingScopesForPaths(
+		const matchingScopes = getMatchingScopesForPaths(
 			[
 				"Assets/Scripts/Runtime/Placement/A.cs",
 				"Assets/Scripts/Runtime/Placement/B.cs",
 			],
 			result.rules,
-			new Set(),
 		);
 
-		expect(missingScopes).toEqual(["runtime-placement"]);
+		expect(matchingScopes).toEqual(["runtime-placement"]);
 	});
 });

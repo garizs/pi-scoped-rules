@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScopedBlockedReason, buildScopedContextMessage, buildScopedMutationPrimer, buildScopedReadPrimer, stripScopedContextMessages } from "../src/render.js";
+import { buildScopedContextMessage, buildScopedMutationPrimer, buildScopedPreparedReason, buildScopedReadPrimer, buildScopedVisibilityFailureReason, redactBlockedMutationToolCalls, stripScopedContextMessages } from "../src/render.js";
 import type { Rule } from "../src/types.js";
 
 const sampleRule: Rule = {
@@ -20,65 +20,54 @@ const sampleRule: Rule = {
 		"- Avoid ad hoc helper leakage.",
 		"- Extra line to prove condensed mode trims.",
 	].join("\n"),
-	sourcePath: "/tmp/placement.md",
-	relativePath: ".agents/rules/placement.md",
+	sourcePath: "/tmp/placement.mdc",
+	relativePath: ".agents/rules/placement.mdc",
 };
 
 describe("render helpers", () => {
 	it("creates a scoped mutation primer for glob rules", () => {
 		const prompt = buildScopedMutationPrimer([sampleRule]);
-		expect(prompt).toContain("Only call edit/write from a model step where the matching scoped rules are visible.");
+		expect(prompt).toContain("SCOPED_RULES_PREPARED");
+		expect(prompt).toContain("Only call edit/write for scoped paths from a model step where the matching scoped rules are visible.");
 		expect(prompt).toContain("runtime-placement");
 		expect(prompt).toContain("Assets/Scripts/Runtime/Placement/**/*.cs");
 	});
 
-	it("creates a scoped read primer for read-only analysis flows", () => {
+	it("creates a scoped read primer without promising read-triggered injection", () => {
 		const prompt = buildScopedReadPrimer([sampleRule]);
-		expect(prompt).toContain("When you read a matching file for review or analysis");
+		expect(prompt).toContain("not injected on every read");
 		expect(prompt).toContain("runtime-placement");
 	});
 
-	it("creates condensed scoped context messages", () => {
-		const message = buildScopedContextMessage([sampleRule], "condensed");
+	it("creates condensed scoped context messages with a nonce", () => {
+		const message = buildScopedContextMessage([sampleRule], "condensed", "nonce-123");
+		expect(message.content).toContain("Scoped-Rules-Nonce: nonce-123");
 		expect(message.content).toContain("Render mode: condensed");
 		expect(message.content).toContain("runtime-placement");
 		expect(message.content).toContain("- Keep placement ownership explicit.");
 		expect(message.content).toContain("...");
 	});
 
-	it("builds a deterministic blocked mutation reason", () => {
-		const reason = buildScopedBlockedReason(
+	it("builds a neutral prepared mutation reason", () => {
+		const reason = buildScopedPreparedReason(
 			"Assets/Scripts/Runtime/Placement/A.cs",
 			["runtime-placement"],
-			["Assets/Scripts/Runtime/Placement/A.cs"],
 		);
-		expect(reason).toContain("SCOPED_RULES_BLOCKED_MUTATION");
+		expect(reason).toContain("SCOPED_RULES_PREPARED");
+		expect(reason).toContain("This is not an error");
+		expect(reason).toContain("Do not apologize");
 		expect(reason).toContain("retryable_now: false");
 		expect(reason).toContain("requires_next_model_call: true");
-		expect(reason).toContain("read exact file: Assets/Scripts/Runtime/Placement/A.cs");
+		expect(reason).not.toContain("read exact file");
 	});
 
-	it("does not require an exact file read when the target file does not exist yet", () => {
-		const reason = buildScopedBlockedReason(
-			"Assets/Scripts/Runtime/Placement/NewFile.cs",
-			["runtime-placement"],
-			[],
-			{ targetExists: false, visibilityRequired: true },
-		);
-		expect(reason).toContain("no exact file read is required because the target path does not exist yet");
-		expect(reason).not.toContain("read exact file: Assets/Scripts/Runtime/Placement/NewFile.cs");
-		expect(reason).toContain('"requiredReads": []');
-	});
-
-	it("does not describe an already-read existing target as a new file", () => {
-		const reason = buildScopedBlockedReason(
+	it("builds a visibility failure reason for loop prevention", () => {
+		const reason = buildScopedVisibilityFailureReason(
 			"Assets/Scripts/Runtime/Placement/A.cs",
 			["runtime-placement"],
-			[],
-			{ targetExists: true, visibilityRequired: true },
 		);
-		expect(reason).toContain("exact file read is already satisfied or not required for this target");
-		expect(reason).not.toContain("target path does not exist yet");
+		expect(reason).toContain("SCOPED_RULES_VISIBILITY_FAILED");
+		expect(reason).toContain("Stopping this turn to avoid a repeated mutation loop");
 	});
 
 	it("removes boilerplate prose and keeps concrete guidance in condensed mode", () => {
@@ -96,50 +85,36 @@ describe("render helpers", () => {
 			].join("\n"),
 		};
 
-		const message = buildScopedContextMessage([verboseRule], "condensed");
+		const message = buildScopedContextMessage([verboseRule], "condensed", "nonce-123");
 		expect(message.content).not.toContain("Apply these rules to placement-layer code only.");
 		expect(message.content).not.toContain("Use this rule whenever you edit placement code.");
 		expect(message.content).toContain("- Keep placement ownership explicit.");
 		expect(message.content).toContain("- Separate preview from commit.");
 	});
 
-	it("includes read-first blocked transition instructions in scoped context messages", () => {
-		const message = buildScopedContextMessage([sampleRule], "full", {
+	it("includes paused mutation transition instructions in scoped context messages", () => {
+		const message = buildScopedContextMessage([sampleRule], "full", "nonce-123", {
 			kind: "blocked",
 			targetPath: "Assets/Scripts/Runtime/Placement/A.cs",
 			scopes: ["runtime-placement"],
-			unreadPaths: ["Assets/Scripts/Runtime/Placement/A.cs"],
 		});
-		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION BLOCKED - READ REQUIRED]");
-		expect(message.content).toContain("Do not call edit/write for the blocked path in this model step.");
-		expect(message.content).toContain("Visible scoped rules are not enough");
-		expect(message.content).toContain("read exact file: Assets/Scripts/Runtime/Placement/A.cs");
+		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION PAUSED]");
+		expect(message.content).toContain("Blocked path: Assets/Scripts/Runtime/Placement/A.cs");
+		expect(message.content).toContain("Use the scoped rules below on this model step that plans the mutation.");
 	});
 
-	it("describes file-creation blocking without demanding a nonexistent read", () => {
-		const message = buildScopedContextMessage([sampleRule], "full", {
-			kind: "blocked",
-			targetPath: "Assets/Scripts/Runtime/Placement/NewFile.cs",
-			scopes: ["runtime-placement"],
-			unreadPaths: [],
-			targetExists: false,
-		});
-		expect(message.content).toContain("no exact file read is required because the target path does not exist yet");
-		expect(message.content).toContain("plans the file creation");
-	});
-
-	it("includes armed transition instructions in scoped context messages", () => {
-		const message = buildScopedContextMessage([sampleRule], "full", {
-			kind: "armed",
+	it("includes prepared transition instructions in scoped context messages", () => {
+		const message = buildScopedContextMessage([sampleRule], "full", "nonce-123", {
+			kind: "prepared",
 			targetPath: "Assets/Scripts/Runtime/Placement/A.cs",
 			scopes: ["runtime-placement"],
 		});
-		expect(message.content).toContain("[SCOPED PROJECT RULES: FILE READ COMPLETE]");
+		expect(message.content).toContain("[SCOPED PROJECT RULES: MUTATION PREPARED]");
 		expect(message.content).toContain("Use them on this model step to plan or apply the upcoming mutation.");
 	});
 
 	it("strips previous scoped context messages to avoid history bloat in live context", () => {
-		const scopedMessage = buildScopedContextMessage([sampleRule], "full");
+		const scopedMessage = buildScopedContextMessage([sampleRule], "full", "nonce-123");
 		const filtered = stripScopedContextMessages([
 			{ role: "user", content: "hello", timestamp: Date.now() },
 			scopedMessage,
@@ -147,5 +122,38 @@ describe("render helpers", () => {
 
 		expect(filtered).toHaveLength(1);
 		expect(filtered[0].role).toBe("user");
+	});
+
+	it("redacts blocked edit arguments from future context", () => {
+		const filtered = redactBlockedMutationToolCalls([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call-1",
+						name: "edit",
+						arguments: {
+							path: "Assets/Scripts/Runtime/Placement/A.cs",
+							edits: [{ oldText: "large old", newText: "large new" }],
+						},
+					},
+				],
+				api: "test",
+				provider: "test",
+				model: "test",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		], new Map([["call-1", {
+			toolName: "edit",
+			paths: ["Assets/Scripts/Runtime/Placement/A.cs"],
+			scopes: ["runtime-placement"],
+		}]]));
+
+		const assistant = filtered[0] as { role: "assistant"; content: Array<{ type: string; arguments: Record<string, unknown> }> };
+		expect(assistant.content[0].arguments.argumentsRedacted).toBe(true);
+		expect(assistant.content[0].arguments).not.toHaveProperty("edits");
 	});
 });

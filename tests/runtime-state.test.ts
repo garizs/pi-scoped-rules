@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { armScopes, clearLastVisibleScopes, clearPendingScopes, evaluateScopedMutationGate, extractMutationPaths, getInactiveMatchingScopesForPaths, getMissingScopesForPaths, getPendingScopedRules, getUnreadScopedPaths, queuePendingScopes, rememberReadPaths } from "../src/runtime.js";
+import { join } from "node:path";
+import { clearActiveIntentForMutation, clearTransientRunState, confirmInflightInjection, evaluateScopedMutationGate, extractMutationPaths, getMatchingScopesForPaths, getPendingScopedRules, getReinjectableIntentScopes, queuePendingScopes, rememberInflightInjection, setActiveIntent, startProviderCall } from "../src/runtime.js";
 import type { RuntimeState, Rule } from "../src/types.js";
 
 const csharpBaselineRule: Rule = {
@@ -45,12 +45,6 @@ function createTempProject(): string {
 	return mkdtempSync(join(tmpdir(), "pi-scoped-rules-runtime-"));
 }
 
-function createExistingFile(projectDir: string, filePath: string): void {
-	const absolutePath = join(projectDir, filePath);
-	mkdirSync(dirname(absolutePath), { recursive: true });
-	writeFileSync(absolutePath, "// existing\n");
-}
-
 function createState(): RuntimeState {
 	return {
 		config: {
@@ -62,65 +56,25 @@ function createState(): RuntimeState {
 		},
 		rules: [placementRule, presentationRule],
 		diagnostics: [],
-		armedScopes: new Set<string>(),
+		rulesRevision: "rev1",
 		pendingScopes: new Set<string>(),
-		lastVisibleScopes: new Set<string>(),
-		readPaths: new Set<string>(),
+		providerCallSeq: 0,
+		blockedToolCalls: new Map(),
 	};
 }
 
+function confirmScopesForCurrentCall(state: RuntimeState, scopes: string[]): void {
+	const providerCallId = startProviderCall(state);
+	rememberInflightInjection(state, {
+		providerCallId,
+		nonce: "nonce-1",
+		scopes,
+		rulesRevision: state.rulesRevision,
+	});
+	expect(confirmInflightInjection(state, "payload nonce-1 payload")).toBe(true);
+}
+
 describe("runtime state", () => {
-	it("detects inactive matching scopes for read-first activation", () => {
-		const state = createState();
-		const scopes = getInactiveMatchingScopesForPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.armedScopes);
-
-		expect(scopes).toEqual(["runtime-placement"]);
-
-		armScopes(state, scopes);
-		expect(getInactiveMatchingScopesForPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.armedScopes)).toEqual([]);
-	});
-
-	it("keeps blocked scopes pending until a matching read arms them", () => {
-		const state = createState();
-		queuePendingScopes(state, ["runtime-placement"]);
-
-		expect([...state.armedScopes]).toEqual([]);
-		expect([...state.pendingScopes]).toEqual(["runtime-placement"]);
-		expect(getPendingScopedRules(state).map((rule) => rule.scope)).toEqual(["runtime-placement"]);
-		expect(getMissingScopesForPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.armedScopes)).toEqual(["runtime-placement"]);
-
-		clearPendingScopes(state);
-		expect([...state.armedScopes]).toEqual([]);
-		expect([...state.pendingScopes]).toEqual([]);
-		expect(getMissingScopesForPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.armedScopes)).toEqual(["runtime-placement"]);
-
-		armScopes(state, ["runtime-placement"]);
-		expect([...state.armedScopes]).toEqual(["runtime-placement"]);
-		expect([...state.pendingScopes]).toEqual(["runtime-placement"]);
-	});
-
-	it("does not require an exact file read for a new target path", () => {
-		const state = createState();
-		armScopes(state, ["runtime-placement"]);
-
-		expect(getUnreadScopedPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.readPaths, "/tmp")).toEqual([]);
-
-		rememberReadPaths(state, ["Assets/Scripts/Runtime/Placement/A.cs"]);
-		expect(getUnreadScopedPaths([
-			"Assets/Scripts/Runtime/Placement/A.cs",
-		], state.rules, state.readPaths, "/tmp")).toEqual([]);
-	});
-
 	it("canonicalizes absolute in-project paths back to project-relative globs", () => {
 		const config = {
 			ruleDirs: [".agents/rules"],
@@ -139,95 +93,117 @@ describe("runtime state", () => {
 		expect(paths).toEqual(["Assets/Scripts/Runtime/Placement/A.cs"]);
 	});
 
-	it("blocks mutation when scope is armed and file was read but rules are not visible", () => {
-		const projectDir = createTempProject();
-		const filePath = "Assets/Scripts/Runtime/Placement/Foo.cs";
-		createExistingFile(projectDir, filePath);
+	it("dedupes matching scopes by logical scope", () => {
 		const state = createState();
-		armScopes(state, ["runtime-placement"]);
-		rememberReadPaths(state, [filePath]);
+		const scopes = getMatchingScopesForPaths([
+			"Assets/Scripts/Runtime/Placement/A.cs",
+			"Assets/Scripts/Runtime/Placement/B.cs",
+		], state.rules);
 
-		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+		expect(scopes).toEqual(["runtime-placement"]);
+	});
+
+	it("blocks scoped mutation when matching scopes were not visible in this provider call", () => {
+		const state = createState();
+		startProviderCall(state);
+
+		const gate = evaluateScopedMutationGate(["Assets/Scripts/Runtime/Placement/Foo.cs"], state, createTempProject());
 
 		expect(gate.allowed).toBe(false);
-		expect(gate.missingScopes).toEqual([]);
-		expect(gate.unreadScopedPaths).toEqual([]);
+		expect(gate.matchingScopes).toEqual(["runtime-placement"]);
 		expect(gate.missingVisibleScopes).toEqual(["runtime-placement"]);
+		expect(gate.reason).toBe("not_visible");
 	});
 
-	it("allows mutation only when the matching scope is visible", () => {
-		const projectDir = createTempProject();
-		const filePath = "Assets/Scripts/Runtime/Placement/Foo.cs";
-		createExistingFile(projectDir, filePath);
+	it("allows mutation only when matching scopes were confirmed for the current provider call", () => {
 		const state = createState();
-		armScopes(state, ["runtime-placement"]);
-		rememberReadPaths(state, [filePath]);
-		state.lastVisibleScopes.add("runtime-placement");
+		confirmScopesForCurrentCall(state, ["runtime-placement"]);
 
-		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+		const gate = evaluateScopedMutationGate(["Assets/Scripts/Runtime/Placement/Foo.cs"], state, createTempProject());
 
 		expect(gate.allowed).toBe(true);
-		expect(gate.missingVisibleScopes).toEqual([]);
+		expect(gate.reason).toBe("visible");
 	});
 
-	it("queues every matching scope when overlapping scoped rules block mutation", () => {
-		const projectDir = createTempProject();
-		const filePath = "Assets/Scripts/Runtime/Placement/Foo.cs";
-		createExistingFile(projectDir, filePath);
+	it("does not allow stale visibility from a previous provider call", () => {
+		const state = createState();
+		confirmScopesForCurrentCall(state, ["runtime-placement"]);
+		startProviderCall(state);
+
+		const gate = evaluateScopedMutationGate(["Assets/Scripts/Runtime/Placement/Foo.cs"], state, createTempProject());
+
+		expect(gate.allowed).toBe(false);
+		expect(gate.reason).toBe("not_visible");
+	});
+
+	it("queues every matching scope for overlapping scoped rules", () => {
 		const state = createState();
 		state.rules = [csharpBaselineRule, placementRule];
-		armScopes(state, ["runtime-placement"]);
-		rememberReadPaths(state, [filePath]);
-		state.lastVisibleScopes.add("runtime-placement");
+		confirmScopesForCurrentCall(state, ["runtime-placement"]);
 
-		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+		const gate = evaluateScopedMutationGate(["Assets/Scripts/Runtime/Placement/Foo.cs"], state, createTempProject());
 
 		expect(gate.allowed).toBe(false);
-		expect(gate.missingScopes).toEqual(["csharp-baseline"]);
+		expect(gate.matchingScopes).toEqual(["csharp-baseline", "runtime-placement"]);
 		expect(gate.missingVisibleScopes).toEqual(["csharp-baseline"]);
-		expect(gate.queuedScopes).toEqual([
-			"csharp-baseline",
-			"runtime-placement",
-		]);
 	});
 
-	it("requires visible rules for new scoped file creation", () => {
-		const projectDir = createTempProject();
-		const filePath = "Assets/Scripts/Runtime/Placement/NewFoo.cs";
+	it("treats an unconfirmed injection for the current provider call as visibility failure", () => {
 		const state = createState();
-		armScopes(state, ["runtime-placement"]);
+		const providerCallId = startProviderCall(state);
+		rememberInflightInjection(state, {
+			providerCallId,
+			nonce: "nonce-missing",
+			scopes: ["runtime-placement"],
+			rulesRevision: state.rulesRevision,
+		});
 
-		expect(evaluateScopedMutationGate([filePath], state, projectDir).allowed).toBe(false);
-
-		state.lastVisibleScopes.add("runtime-placement");
-		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
-
-		expect(gate.allowed).toBe(true);
-		expect(gate.unreadScopedPaths).toEqual([]);
-		expect(gate.targetPathExists).toBe(false);
-	});
-
-	it("blocks when a different scope is visible than the target requires", () => {
-		const projectDir = createTempProject();
-		const filePath = "Assets/Scripts/Runtime/Presentation/Hud.cs";
-		createExistingFile(projectDir, filePath);
-		const state = createState();
-		armScopes(state, ["runtime-presentation"]);
-		rememberReadPaths(state, [filePath]);
-		state.lastVisibleScopes.add("runtime-placement");
-
-		const gate = evaluateScopedMutationGate([filePath], state, projectDir);
+		const gate = evaluateScopedMutationGate(["Assets/Scripts/Runtime/Placement/Foo.cs"], state, createTempProject());
 
 		expect(gate.allowed).toBe(false);
-		expect(gate.missingVisibleScopes).toEqual(["runtime-presentation"]);
+		expect(gate.reason).toBe("visibility_failed");
 	});
 
-	it("clears visible scopes for a provider context with no pending rules", () => {
+	it("requires reinjection when rules revision changes after confirmation", () => {
 		const state = createState();
-		state.lastVisibleScopes.add("runtime-placement");
+		confirmScopesForCurrentCall(state, ["runtime-placement"]);
+		state.rulesRevision = "rev2";
 
-		clearLastVisibleScopes(state);
+		const gate = evaluateScopedMutationGate(["Assets/Scripts/Runtime/Placement/Foo.cs"], state, createTempProject());
 
-		expect([...state.lastVisibleScopes]).toEqual([]);
+		expect(gate.allowed).toBe(false);
+		expect(gate.reason).toBe("rules_changed");
+	});
+
+	it("keeps pending scopes and bounded active-intent reinjection separate from reads", () => {
+		const state = createState();
+		queuePendingScopes(state, ["runtime-placement"]);
+		expect(getPendingScopedRules(state).map((rule) => rule.scope)).toEqual(["runtime-placement"]);
+
+		setActiveIntent(state, ["Assets/Scripts/Runtime/Placement/Foo.cs"], ["runtime-placement"]);
+		expect(getReinjectableIntentScopes(state)).toEqual(["runtime-placement"]);
+		expect(getReinjectableIntentScopes(state)).toEqual([]);
+	});
+
+	it("clears active intent after a matching successful mutation", () => {
+		const state = createState();
+		setActiveIntent(state, ["Assets/Scripts/Runtime/Placement/Foo.cs"], ["runtime-placement"]);
+		clearActiveIntentForMutation(state, ["Assets/Scripts/Runtime/Placement/Foo.cs"], ["runtime-placement"]);
+
+		expect(state.activeIntent).toBeUndefined();
+	});
+
+	it("clears transient state at agent end", () => {
+		const state = createState();
+		queuePendingScopes(state, ["runtime-placement"]);
+		setActiveIntent(state, ["Assets/Scripts/Runtime/Placement/Foo.cs"], ["runtime-placement"]);
+		confirmScopesForCurrentCall(state, ["runtime-placement"]);
+
+		clearTransientRunState(state);
+
+		expect([...state.pendingScopes]).toEqual([]);
+		expect(state.activeIntent).toBeUndefined();
+		expect(state.confirmedVisibility).toBeUndefined();
+		expect(state.currentProviderCallId).toBeUndefined();
 	});
 });

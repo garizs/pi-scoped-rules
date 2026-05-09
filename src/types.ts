@@ -25,11 +25,12 @@ export interface RuleDiagnostic {
 export interface RuleLoadResult {
 	rules: Rule[];
 	diagnostics: RuleDiagnostic[];
+	revision: string;
 }
 
 export type RuleRenderMode = "full" | "condensed";
 
-export type ScopedRuleEnforcementMode = "armed_scope" | "visible_in_current_context";
+export type ScopedRuleEnforcementMode = "visible_in_current_context";
 
 export interface ScopedRulesConfig {
 	ruleDirs: string[];
@@ -43,39 +44,62 @@ export type ScopedTransitionNotice = {
 	kind: "blocked";
 	targetPath: string;
 	scopes: string[];
-	unreadPaths: string[];
-	targetExists?: boolean;
-	visibilityRequired?: boolean;
+	visibilityFailed?: boolean;
 } | {
-	kind: "armed";
+	kind: "prepared";
 	targetPath: string;
 	scopes: string[];
 };
 
 export interface ScopedMutationGateResult {
 	allowed: boolean;
-	missingScopes: string[];
-	unreadScopedPaths: string[];
+	matchingScopes: string[];
 	missingVisibleScopes: string[];
-	queuedScopes: string[];
-	targetPathExists: boolean;
+	reason: "unscoped" | "visible" | "not_visible" | "visibility_failed" | "rules_changed";
+}
+
+export interface ScopedRulesInjection {
+	providerCallId: number;
+	nonce: string;
+	scopes: string[];
+	rulesRevision: string;
+}
+
+export interface ScopedRulesVisibility {
+	providerCallId: number;
+	nonce: string;
+	scopes: string[];
+	rulesRevision: string;
+}
+
+export interface ScopedMutationIntent {
+	paths: string[];
+	scopes: string[];
+	remainingReinjections: number;
+}
+
+export interface BlockedMutationToolCall {
+	toolName: string;
+	paths: string[];
+	scopes: string[];
 }
 
 export interface RuntimeState {
 	config: ScopedRulesConfig;
 	rules: Rule[];
 	diagnostics: RuleDiagnostic[];
-	armedScopes: Set<string>;
+	rulesRevision: string;
 	pendingScopes: Set<string>;
-	lastVisibleScopes: Set<string>;
-	lastVisibleRuleMessageId?: number;
-	readPaths: Set<string>;
+	providerCallSeq: number;
+	currentProviderCallId?: number;
+	inflightInjection?: ScopedRulesInjection;
+	confirmedVisibility?: ScopedRulesVisibility;
+	activeIntent?: ScopedMutationIntent;
+	blockedToolCalls: Map<string, BlockedMutationToolCall>;
 	lastBlockedPath?: string;
 	lastBlockedScopes?: string[];
-	lastBlockedUnreadPaths?: string[];
-	lastBlockedTargetExists?: boolean;
-	lastBlockedVisibilityRequired?: boolean;
-	repeatedUnreadMutationBlockCount?: number;
-	lastActivatedPath?: string;
-	lastActivatedScopes?: string[];
+	lastVisibilityFailureKey?: string;
+	visibilityFailureCount?: number;
+	lastPreparedPath?: string;
+	lastPreparedScopes?: string[];
 }

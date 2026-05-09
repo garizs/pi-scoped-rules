@@ -15,7 +15,7 @@ That can waste context on broad tasks that touch many files, layers, or subsyste
 
 `pi-scoped-rules` is built to solve that by:
 
-- loading project rules from Markdown / MDC files
+- loading project rules from canonical `.mdc` files
 - matching them by file globs and logical scopes
 - blocking only mutating actions when required scoped rules are missing or not visible in the current provider call
 - injecting rule guidance **ephemerally** via Pi's `context` event
@@ -40,25 +40,23 @@ By default the extension only watches these mutating tools:
 - `edit`
 - `write`
 
-If a mutation targets a path matched by scoped rules and those scopes were not visible in the current provider call, the tool call is blocked with a **short** reason.
-For existing files, the agent must also successfully `read` the exact target file before later mutations of that file are allowed.
+If a mutation targets a path matched by scoped rules and those scopes were not confirmed visible in the provider call that generated the mutation, the tool call is paused with a **short neutral** reason. The matching scopes are queued for ephemeral injection on the next model step.
 
 ### 3. Scoped guidance is ephemeral
 
-When a mutation is blocked, the relevant scopes are queued for one-shot guidance injection on the **next** LLM call.
-A successful `read` of the exact target file then arms those scopes for the current run, records that file as eligible for mutation, and queues the same scoped guidance again for the following model step that will plan the mutation.
-In the default strict mode, `armed` is only bookkeeping: `edit` / `write` is allowed only from a model response generated while the matching scoped rules were visible.
+When a mutation is paused, the relevant scopes are queued for one-shot guidance injection on the **next** LLM call. The injected hidden message includes a nonce, and the extension confirms that nonce in `before_provider_request` before treating those scopes as visible.
 
-For read-only agents that do not expose mutating tools, the extension switches to a read-analysis primer instead of a mutation primer, but the scoped guidance is still injected ephemerally after relevant file reads.
+For read-only agents that do not expose mutating tools, the extension switches to a read-analysis primer instead of a mutation primer, but it does not inject full scoped rule bodies on every read.
 
 That means:
 
-- matching scoped rules influence the next model step after a blocked mutation
-- a `read` of the exact target file is required before mutating existing scoped files
-- read-only review / analysis agents still get matching scoped guidance after reading relevant files
-- the same rule blob is **not** re-injected on every later call in the run
-- visible scoped rules are tracked per provider call and cleared when no rules are injected
-- armed scopes do not grant mutation permission in the default strict mode
+- matching scoped rules influence the next model step after a paused mutation
+- exact `read` is not required by scoped-rule enforcement
+- full scoped rule bodies are not injected on ordinary reads
+- the same rule blob is **not** persistently added to session history
+- visible scoped rules are tracked per provider call and cleared for the next provider call
+- a scoped mutation is allowed only from a model response generated while the matching scoped rules were confirmed visible
+- blocked `edit` / `write` arguments are redacted from future live context to avoid diff bloat
 
 If `renderMode` is `"condensed"`, the extension keeps the same matching rules but rewrites them into a deterministic compact form:
 
@@ -76,9 +74,9 @@ This means the scoped rules:
 - do **not** become persistent session history
 - do **not** keep rotting the context across future turns
 
-### 4. Scopes clear at the end of the run
+### 4. Transient state clears at the end of the run
 
-Active scopes are cleared on `agent_end`.
+Pending scopes, confirmed visibility, active mutation intent, and redaction state are cleared on `agent_end`.
 
 ## Canonical .mdc format
 
@@ -175,10 +173,10 @@ Example:
 
 Config fields:
 
-- `ruleDirs`: directories to scan for `.md` / `.mdc` rules
+- `ruleDirs`: directories to scan for `.mdc` rules
 - `includeModelDecisionSummary`: optionally list `model_decision` rules in the system prompt
 - `renderMode`: `"full"` or `"condensed"`
-- `enforcementMode`: `"visible_in_current_context"` (default strict mode) or `"armed_scope"` (legacy compatibility)
+- `enforcementMode`: `"visible_in_current_context"` (strict nonce-confirmed visibility mode)
 - `mutatingTools`: custom tool -> path field mappings
 
 `pathFields` can point to either:
@@ -188,13 +186,13 @@ Config fields:
 
 ## Commands
 
-- `/scoped-rules-status` — shows loaded rules plus armed, pending, and last-visible scopes
+- `/scoped-rules-status` — shows loaded rules plus pending scopes, current confirmed visibility, active intent, and diagnostics
 
 ## Current design choices
 
 - **Scope dedupe instead of path dedupe**
 - **Mutation-only gating** by default
-- **Ephemeral context injection** instead of persistent history pollution
+- **Nonce-confirmed ephemeral context injection** instead of persistent history pollution
 - **Short global prompt overhead**
 - **Project-local rule source files** that remain easy to version and review
 

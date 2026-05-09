@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Rule, RuleRenderMode, ScopedTransitionNotice } from "./types.js";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { BlockedMutationToolCall, Rule, RuleRenderMode, ScopedTransitionNotice } from "./types.js";
 
 type EphemeralScopedContextMessage = AgentMessage & {
 	role: "custom";
@@ -41,12 +41,9 @@ export function buildScopedMutationPrimer(rules: Rule[]): string {
 	}).join("\n");
 
 	return `\n\n## Scoped Mutation Rules\n\n`
-		+ "Some project mutation rules are path-scoped and are mandatory for matching edit/write calls.\n\n"
-		+ "Before calling edit/write for a file matching any scoped mutation rule:\n"
-		+ "1. Read the exact existing target file first.\n"
-		+ "2. Wait for the scoped rule guidance injected after that read.\n"
-		+ "3. Only call edit/write from a model step where the matching scoped rules are visible.\n\n"
-		+ "If the target file does not exist, do not create it until the scoped rules for its target path have been injected.\n\n"
+		+ "Some project mutation rules are path-scoped and mandatory for matching edit/write calls. They are injected lazily and ephemerally only when a matching mutation is attempted.\n\n"
+		+ "If edit/write is paused with SCOPED_RULES_PREPARED, this is normal control flow, not a failure. Do not apologize, do not ask the user to apply a diff manually, and do not claim tools are unavailable. Continue on the next model step after the scoped rules are injected.\n\n"
+		+ "Only call edit/write for scoped paths from a model step where the matching scoped rules are visible.\n\n"
 		+ `${items}`;
 }
 
@@ -61,7 +58,7 @@ export function buildScopedReadPrimer(rules: Rule[]): string {
 	}).join("\n");
 
 	return `\n\n## Scoped Read Rules\n\n`
-		+ "Some project rules are path-scoped. When you read a matching file for review or analysis, the matching scoped guidance may be injected ephemerally on the next model step. Apply that guidance to your reasoning without repeating the full rule blobs in chat history.\n\n"
+		+ "Some project rules are path-scoped. Full scoped guidance is injected lazily for matching mutations and is not injected on every read, to avoid context bloat.\n\n"
 		+ `${items}`;
 }
 
@@ -115,43 +112,40 @@ function condenseRuleContent(content: string): string {
 	return candidateLines.length > DEFAULT_CONDENSED_RULE_LINES ? `${condensed}\n...` : condensed;
 }
 
-export function buildScopedBlockedReason(
-	targetPath: string,
-	scopes: string[],
-	unreadPaths: string[],
-	options: { targetExists?: boolean; visibilityRequired?: boolean } = {},
-): string {
-	const requiredReads = unreadPaths;
+export function buildScopedPreparedReason(targetPath: string, scopes: string[]): string {
 	const payload = {
-		status: "blocked_by_scoped_rules",
+		status: "normal_scoped_rules_preflight",
 		targetPath,
 		scopes,
-		requiredReads,
-		requiresVisibleScopedRules: options.visibilityRequired ?? true,
-		targetExists: options.targetExists,
-		requiresNextModelCall: true,
 		retryableNow: false,
+		requiresNextModelCall: true,
 	};
-	const readActions = requiredReads.length > 0
-		? requiredReads.map((path) => `- read exact file: ${path}`)
-		: options.targetExists === false
-			? ["- no exact file read is required because the target path does not exist yet"]
-			: ["- exact file read is already satisfied or not required for this target"];
 
 	return [
-		"SCOPED_RULES_BLOCKED_MUTATION",
-		"status: blocked_by_scoped_rules",
+		"SCOPED_RULES_PREPARED",
+		"status: normal_scoped_rules_preflight",
+		"This is not an error. The attempted mutation targets a path covered by project scoped rules.",
+		"The mutation was intentionally paused so the next model step can generate the change with the required rules visible.",
+		"Do not apologize. Do not ask the user to apply a diff manually. Do not claim tools are unavailable.",
+		"Do not retry this mutation in the same model step.",
+		"Continue after the scoped rules are injected.",
 		`target: ${targetPath}`,
 		`matching_scopes: ${scopes.join(", ")}`,
-		"required_next_actions:",
-		...readActions,
-		"- stop mutating this path in the current tool-calling message",
-		"- wait for the next model call where the matching scoped rules are visible",
-		"- only then retry the mutation",
 		"retryable_now: false",
 		"requires_next_model_call: true",
 		"payload:",
 		JSON.stringify(payload, null, 2),
+	].join("\n");
+}
+
+export function buildScopedVisibilityFailureReason(targetPath: string, scopes: string[]): string {
+	return [
+		"SCOPED_RULES_VISIBILITY_FAILED",
+		"status: scoped_rules_visibility_failed",
+		"Scoped rules were queued for this mutation, but the extension could not confirm that they reached the provider request.",
+		"Stopping this turn to avoid a repeated mutation loop.",
+		`target: ${targetPath}`,
+		`matching_scopes: ${scopes.join(", ")}`,
 	].join("\n");
 }
 
@@ -171,45 +165,22 @@ function buildScopedTransitionHeader(transition: ScopedTransitionNotice | undefi
 	}
 
 	if (transition.kind === "blocked") {
-		if (transition.unreadPaths.length > 0) {
-			return [
-				"[SCOPED PROJECT RULES: MUTATION BLOCKED - READ REQUIRED]",
-				"The previous edit/write was blocked because the exact target file has not been read in this run.",
-				"Do not call edit/write for the blocked path in this model step.",
-				"Visible scoped rules are not enough: the mutation gate will continue blocking until the exact read succeeds.",
-				`Blocked path: ${transition.targetPath}`,
-				`Scopes: ${transition.scopes.join(", ")}`,
-				"Required next tool call(s):",
-				...transition.unreadPaths.map((path) => `- read exact file: ${path}`),
-				"After the read result, wait for the next model step with scoped rules visible before retrying edit/write.",
-			].join("\n");
-		}
-
-		const readActions = transition.targetExists === false
-			? [
-				"- no exact file read is required because the target path does not exist yet",
-				"- use the scoped rules below on this model step that plans the file creation",
-			]
-			: [
-				"- exact file read is already satisfied or not required for this target",
-				"- use the scoped rules below on this model step that plans the mutation",
-			];
 		return [
-			"[SCOPED PROJECT RULES: MUTATION BLOCKED]",
+			transition.visibilityFailed
+				? "[SCOPED PROJECT RULES: VISIBILITY CONFIRMATION FAILED]"
+				: "[SCOPED PROJECT RULES: MUTATION PAUSED]",
 			...mandatoryGuidance,
 			`Blocked path: ${transition.targetPath}`,
 			`Scopes: ${transition.scopes.join(", ")}`,
-			"Required next actions:",
-			...readActions,
+			"Use the scoped rules below on this model step that plans the mutation.",
 		].join("\n");
 	}
 
 	return [
-		"[SCOPED PROJECT RULES: FILE READ COMPLETE]",
+		"[SCOPED PROJECT RULES: MUTATION PREPARED]",
 		...mandatoryGuidance,
-		`Read path: ${transition.targetPath}`,
-		`Armed scopes: ${transition.scopes.join(", ")}`,
-		"The scoped rules below are now armed for this run.",
+		`Prepared path: ${transition.targetPath}`,
+		`Prepared scopes: ${transition.scopes.join(", ")}`,
 		"Use them on this model step to plan or apply the upcoming mutation.",
 	].join("\n");
 }
@@ -217,6 +188,7 @@ function buildScopedTransitionHeader(transition: ScopedTransitionNotice | undefi
 export function buildScopedContextMessage(
 	rules: Rule[],
 	renderMode: RuleRenderMode,
+	nonce: string,
 	transition?: ScopedTransitionNotice,
 ): EphemeralScopedContextMessage {
 	const scopeList = [...new Set(rules.map((rule) => rule.scope))].join(", ");
@@ -233,6 +205,7 @@ export function buildScopedContextMessage(
 		customType: CONTEXT_MESSAGE_TYPE,
 		content:
 			`${buildScopedTransitionHeader(transition)}\n`
+			+ `Scoped-Rules-Nonce: ${nonce}\n`
 			+ `Render mode: ${renderMode}\n`
 			+ `Active scopes: ${scopeList}\n\n`
 			+ renderedRules,
@@ -243,4 +216,48 @@ export function buildScopedContextMessage(
 
 export function stripScopedContextMessages(messages: AgentMessage[]): AgentMessage[] {
 	return messages.filter((message) => !(message.role === "custom" && message.customType === CONTEXT_MESSAGE_TYPE));
+}
+
+function redactToolCallArguments(args: unknown, blocked: BlockedMutationToolCall): Record<string, unknown> {
+	const original = args && typeof args === "object" ? args as Record<string, unknown> : {};
+	return {
+		path: original.path,
+		paths: blocked.paths,
+		blockedByScopedRules: true,
+		scopes: blocked.scopes,
+		argumentsRedacted: true,
+	};
+}
+
+export function redactBlockedMutationToolCalls(messages: AgentMessage[], blockedToolCalls: Map<string, BlockedMutationToolCall>): AgentMessage[] {
+	if (blockedToolCalls.size === 0) {
+		return messages;
+	}
+
+	return messages.map((message) => {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) {
+			return message;
+		}
+
+		let changed = false;
+		const content = message.content.map((block) => {
+			const candidate = block as { type?: string; id?: string; arguments?: unknown };
+			if (candidate.type !== "toolCall" || !candidate.id) {
+				return block;
+			}
+
+			const blocked = blockedToolCalls.get(candidate.id);
+			if (!blocked) {
+				return block;
+			}
+
+			changed = true;
+			return {
+				...block,
+				arguments: redactToolCallArguments(candidate.arguments, blocked),
+			} as typeof block;
+		});
+
+		return changed ? { ...message, content } as AgentMessage : message;
+	});
 }

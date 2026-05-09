@@ -32,7 +32,7 @@ function parseRenderMode(value: unknown): RuleRenderMode | undefined {
 }
 
 function parseEnforcementMode(value: unknown): ScopedRuleEnforcementMode | undefined {
-	if (value === "armed_scope" || value === "visible_in_current_context") {
+	if (value === "visible_in_current_context") {
 		return value;
 	}
 

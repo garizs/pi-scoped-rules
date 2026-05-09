@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { parseFrontmatter, parseStringList } from "./frontmatter.js";
@@ -97,6 +98,26 @@ function validateRule(cwd: string, relativePath: string, raw: string): { rule?: 
 	};
 }
 
+function createRulesRevision(rules: Rule[], diagnostics: RuleDiagnostic[], config: ScopedRulesConfig): string {
+	const stableRules = rules.map((rule) => ({
+		id: rule.id,
+		name: rule.name,
+		scope: rule.scope,
+		trigger: rule.trigger,
+		description: rule.description,
+		globs: rule.globs,
+		content: rule.content,
+		relativePath: rule.relativePath,
+	}));
+	const payload = JSON.stringify({
+		ruleDirs: config.ruleDirs,
+		renderMode: config.renderMode,
+		rules: stableRules,
+		diagnostics,
+	});
+	return createHash("sha256").update(payload).digest("hex");
+}
+
 export function loadRules(cwd: string, config: ScopedRulesConfig): RuleLoadResult {
 	const rules: Rule[] = [];
 	const diagnostics: RuleDiagnostic[] = [];
@@ -114,8 +135,12 @@ export function loadRules(cwd: string, config: ScopedRulesConfig): RuleLoadResul
 		}
 	}
 
+	const sortedRules = rules.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+	const sortedDiagnostics = diagnostics.sort((left, right) => left.relativePath.localeCompare(right.relativePath) || left.message.localeCompare(right.message));
+
 	return {
-		rules: rules.sort((left, right) => left.relativePath.localeCompare(right.relativePath)),
-		diagnostics: diagnostics.sort((left, right) => left.relativePath.localeCompare(right.relativePath) || left.message.localeCompare(right.message)),
+		rules: sortedRules,
+		diagnostics: sortedDiagnostics,
+		revision: createRulesRevision(sortedRules, sortedDiagnostics, config),
 	};
 }
