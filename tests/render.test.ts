@@ -124,7 +124,7 @@ describe("render helpers", () => {
 		expect(filtered[0].role).toBe("user");
 	});
 
-	it("redacts blocked edit arguments from future context", () => {
+	it("removes blocked edit tool calls and paired preflight results from future context", () => {
 		const filtered = redactBlockedMutationToolCalls([
 			{
 				role: "assistant",
@@ -146,14 +146,67 @@ describe("render helpers", () => {
 				stopReason: "toolUse",
 				timestamp: Date.now(),
 			},
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "edit",
+				content: [{ type: "text", text: buildScopedPreparedReason("Assets/Scripts/Runtime/Placement/A.cs", ["runtime-placement"]) }],
+				isError: true,
+				timestamp: Date.now(),
+			},
 		], new Map([["call-1", {
 			toolName: "edit",
 			paths: ["Assets/Scripts/Runtime/Placement/A.cs"],
 			scopes: ["runtime-placement"],
 		}]]));
 
-		const assistant = filtered[0] as { role: "assistant"; content: Array<{ type: string; arguments: Record<string, unknown> }> };
-		expect(assistant.content[0].arguments.argumentsRedacted).toBe(true);
-		expect(assistant.content[0].arguments).not.toHaveProperty("edits");
+		expect(filtered).toHaveLength(1);
+		const assistant = filtered[0] as { role: "assistant"; content: Array<{ type: string; text?: string; arguments?: Record<string, unknown> }> };
+		expect(assistant.content[0].type).toBe("text");
+		expect(assistant.content[0].text).toContain("Previous edit call");
+		expect(assistant.content[0]).not.toHaveProperty("arguments");
+	});
+
+	it("strips persisted redacted tool calls so models cannot copy invalid arguments", () => {
+		const filtered = redactBlockedMutationToolCalls([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "call-redacted",
+						name: "edit",
+						arguments: {
+							path: "Assets/Scripts/Runtime/Placement/A.cs",
+							paths: ["Assets/Scripts/Runtime/Placement/A.cs"],
+							blockedByScopedRules: true,
+							scopes: ["runtime-placement"],
+							argumentsRedacted: true,
+						},
+					},
+				],
+				api: "test",
+				provider: "test",
+				model: "test",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call-redacted",
+				toolName: "edit",
+				content: [{ type: "text", text: "Validation failed for tool \"edit\"" }],
+				isError: true,
+				timestamp: Date.now(),
+			},
+		], new Map());
+
+		expect(filtered).toHaveLength(1);
+		const assistant = filtered[0] as { role: "assistant"; content: Array<{ type: string; text?: string; arguments?: Record<string, unknown> }> };
+		expect(assistant.content[0].type).toBe("text");
+		expect(assistant.content[0].text).toContain("Previous edit call");
+		expect(JSON.stringify(filtered)).not.toContain("argumentsRedacted");
+		expect(JSON.stringify(filtered)).not.toContain("blockedByScopedRules");
 	});
 });

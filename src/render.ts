@@ -218,46 +218,162 @@ export function stripScopedContextMessages(messages: AgentMessage[]): AgentMessa
 	return messages.filter((message) => !(message.role === "custom" && message.customType === CONTEXT_MESSAGE_TYPE));
 }
 
-function redactToolCallArguments(args: unknown, blocked: BlockedMutationToolCall): Record<string, unknown> {
-	const original = args && typeof args === "object" ? args as Record<string, unknown> : {};
+type BlockedToolCallSummary = {
+	toolName: string;
+	paths: string[];
+	scopes: string[];
+};
+
+type ToolCallLike = {
+	type?: string;
+	id?: string;
+	name?: string;
+	arguments?: unknown;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function getToolResultText(message: AgentMessage): string {
+	if (message.role !== "toolResult") {
+		return "";
+	}
+
+	return message.content
+		.filter((block): block is { type: "text"; text: string } => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+function isScopedPreflightResult(text: string): boolean {
+	return text.includes("SCOPED_RULES_PREPARED") || text.includes("SCOPED_RULES_VISIBILITY_FAILED");
+}
+
+function parseScopesFromScopedResult(text: string): string[] {
+	const match = /^matching_scopes:\s*(.+)$/m.exec(text);
+	if (!match) {
+		return [];
+	}
+
+	return match[1]
+		.split(",")
+		.map((scope) => scope.trim())
+		.filter((scope) => scope.length > 0);
+}
+
+function parsePathFromScopedResult(text: string): string[] {
+	const match = /^target:\s*(.+)$/m.exec(text);
+	return match ? [match[1].trim()].filter((path) => path.length > 0) : [];
+}
+
+function getStringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function summaryFromRedactedArguments(toolName: string | undefined, args: unknown): BlockedToolCallSummary | undefined {
+	const record = asRecord(args);
+	if (!record || record.blockedByScopedRules !== true && record.argumentsRedacted !== true) {
+		return undefined;
+	}
+
+	const paths = getStringArray(record.paths);
+	const path = typeof record.path === "string" ? record.path : undefined;
 	return {
-		path: original.path,
-		paths: blocked.paths,
-		blockedByScopedRules: true,
-		scopes: blocked.scopes,
-		argumentsRedacted: true,
+		toolName: toolName ?? "mutation",
+		paths: paths.length > 0 ? paths : path ? [path] : [],
+		scopes: getStringArray(record.scopes),
+	};
+}
+
+function collectBlockedToolCallSummaries(
+	messages: AgentMessage[],
+	blockedToolCalls: Map<string, BlockedMutationToolCall>,
+): Map<string, BlockedToolCallSummary> {
+	const summaries = new Map<string, BlockedToolCallSummary>();
+
+	for (const [id, blocked] of blockedToolCalls) {
+		summaries.set(id, {
+			toolName: blocked.toolName,
+			paths: blocked.paths,
+			scopes: blocked.scopes,
+		});
+	}
+
+	for (const message of messages) {
+		if (message.role === "assistant" && Array.isArray(message.content)) {
+			for (const block of message.content) {
+				const candidate = block as ToolCallLike;
+				if (candidate.type !== "toolCall" || !candidate.id) {
+					continue;
+				}
+
+				const summary = summaryFromRedactedArguments(candidate.name, candidate.arguments);
+				if (summary) {
+					summaries.set(candidate.id, summary);
+				}
+			}
+		}
+
+		if (message.role === "toolResult") {
+			const text = getToolResultText(message);
+			if (isScopedPreflightResult(text)) {
+				summaries.set(message.toolCallId, {
+					toolName: message.toolName,
+					paths: parsePathFromScopedResult(text),
+					scopes: parseScopesFromScopedResult(text),
+				});
+			}
+		}
+	}
+
+	return summaries;
+}
+
+function summarizeBlockedToolCall(summary: BlockedToolCallSummary): { type: "text"; text: string } {
+	const target = summary.paths.length > 0 ? summary.paths.join(", ") : "matching scoped path";
+	const scopes = summary.scopes.length > 0 ? summary.scopes.join(", ") : "scoped rules";
+	return {
+		type: "text",
+		text: `[pi-scoped-rules] Previous ${summary.toolName} call for ${target} was paused by scoped rules (${scopes}); original tool arguments were removed from live context.`,
 	};
 }
 
 export function redactBlockedMutationToolCalls(messages: AgentMessage[], blockedToolCalls: Map<string, BlockedMutationToolCall>): AgentMessage[] {
-	if (blockedToolCalls.size === 0) {
+	const summaries = collectBlockedToolCallSummaries(messages, blockedToolCalls);
+	if (summaries.size === 0) {
 		return messages;
 	}
 
-	return messages.map((message) => {
+	const redactedMessages: AgentMessage[] = [];
+	for (const message of messages) {
+		if (message.role === "toolResult" && summaries.has(message.toolCallId)) {
+			continue;
+		}
+
 		if (message.role !== "assistant" || !Array.isArray(message.content)) {
-			return message;
+			redactedMessages.push(message);
+			continue;
 		}
 
 		let changed = false;
 		const content = message.content.map((block) => {
-			const candidate = block as { type?: string; id?: string; arguments?: unknown };
+			const candidate = block as ToolCallLike;
 			if (candidate.type !== "toolCall" || !candidate.id) {
 				return block;
 			}
 
-			const blocked = blockedToolCalls.get(candidate.id);
-			if (!blocked) {
+			const summary = summaries.get(candidate.id);
+			if (!summary) {
 				return block;
 			}
 
 			changed = true;
-			return {
-				...block,
-				arguments: redactToolCallArguments(candidate.arguments, blocked),
-			} as typeof block;
+			return summarizeBlockedToolCall(summary);
 		});
 
-		return changed ? { ...message, content } as AgentMessage : message;
-	});
+		redactedMessages.push(changed ? { ...message, content } as AgentMessage : message);
+	}
+
+	return redactedMessages;
 }
